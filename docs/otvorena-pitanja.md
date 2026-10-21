@@ -1,6 +1,5 @@
 # Otvorena pitanja
 
-Sve što čeka odgovor od Halo Travela (ili ITum-a). Kad stigne odgovor, upiši ga ispod pitanja sa datumom i označi `[x]`.
 
 ## Cene i Excel (blokira korake 3b, 4–6, 8e, 8f, 9, 12b)
 - [ ] Formula od cene dobavljača do cene na sajtu: marža, kurs, avio deo, transfer, zaokruživanje.
@@ -10,7 +9,7 @@ Sve što čeka odgovor od Halo Travela (ili ITum-a). Kad stigne odgovor, upiši 
 - [ ] Royal Star Beach Resort 4*, Hurgada, 29.10., 1/2 → 493 € po osobi: broj noći, aerodrom i šta ulazi u cenu?
 - [ ] Model cene za Grčku: po jedinici po noći, po osobi, ili smeštaj po jedinici + prevoz po osobi? Fiksni dani dolaska, minimalan broj noći?
 - [ ] Uzrasne granice dece, treća osoba, dete sa jednim odraslim, po dobavljaču.
-- [ ] Uzrast deteta se računa na dan polaska ili na dan povratka?
+- [ ] Uzrast deteta se računa na dan polaska?
 - [ ] Stop sale: da li jedna zatvorena noć zatvara ceo termin?
 - [ ] Da li se popusti (early booking, first minute) i korekcije sabiraju ili važi samo najveći?
 - [ ] Da li postoji usluga UAI (ultra all inclusive)?
@@ -27,19 +26,19 @@ Sve što čeka odgovor od Halo Travela (ili ITum-a). Kad stigne odgovor, upiši 
 - [ ] Tekstovi statičnih stranica: O nama, Kontakt, FAQ, Politika privatnosti (Stefan pita na sastanku). Uređuje ih osoblje u adminu ili su u kodu?
 - [ ] Logo u vektoru (SVG).
 - [ ] Da li imaju prava na sve fotografije koje koriste (hoteli, destinacije)?
-- [ ] Način odobravanja dizajna: Figma mockup ili Vercel preview link? (ITum / Stefan)
+
 
 ## Pristupi i nalozi
 - [ ] Ko od osoblja ima koju ulogu (editor / prodaja / admin)?
 - [ ] Pristup DNS-u za halotravel.rs (Resend SPF/DKIM, lansiranje) i gde je mejl hostovan.
 - [ ] Pristup Google Search Console-u (za 301 preusmerenja).
 - [ ] Postojeći GA4 i Meta piksel nalozi.
-- [ ] Prenos naloga (Vercel, Supabase, Resend) sa prWeb-a na klijenta: kada i kako.
+
 
 ## Sastanak sa Banetom (još nije održan)
-- [ ] Rok MVP-a (npr. pre first minute prodaje za Leto 2027).
+- [ ] Rok MVP-a.
 - [ ] Način plaćanja: virtuelni POS banke, IPS QR ili predračun kao danas? Sa kojom bankom rade?
-- [ ] Elektronski ugovor (klik + kod): da li ga želi već u MVP-u (+ oko 1 nedelja)?
+- [ ] Elektronski ugovor (klik + kod): da li ga želi već u MVP-u?
 - [ ] Održavanje posle lansiranja: model i iznos.
 - [ ] RateHawk: da li odobrava da tražimo API i dozvolu za javni prikaz cena?
 - [ ] Ko od osoblja unosi ponude i ko odobrava specifikaciju?
