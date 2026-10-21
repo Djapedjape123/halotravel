@@ -1,5 +1,6 @@
 {
   "enabledPlugins": {
-    "supabase@anthropic-plugin-directory": true
+    "supabase@anthropic-plugin-directory": true,
+    "securitymaxxing@anthropic-plugin-directory": true
   }
 }
