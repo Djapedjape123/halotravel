@@ -73,6 +73,8 @@ Kontakti kod klijenta: Milica i Dimitrije (operativa), Bane (vlasnik, donosi pos
 | Forme | react-hook-form + zod | ista zod šema na klijentu i serveru |
 | Testovi | Vitest, fast-check, pgTAP, Playwright | |
 
+Na čekanju: Cloudflare Turnstile (CAPTCHA za formu zahteva i prijavu), ODLUKA-2 u `docs/bezbednost.md`. Ne dodavati dok se ne odobri.
+
 ### Nalozi i okruženja
 - Nalozi za Vercel, Supabase, Resend i GitHub su za razvoj na **prWeb-u**. Prenos na klijenta (ili ITum) dogovara se kasnije.
 - **Pre lansiranja:** Vercel Pro (Hobby plan ne dozvoljava komercijalnu upotrebu) i Supabase Pro (besplatni projekat se pauzira posle neaktivnosti i nema dnevne backup-e).
@@ -157,6 +159,14 @@ src/
       parse.ts
       diff.ts
       profiles/                # mapiranje po dobavljaču (npr. egypt-partner.ts)
+    auth/
+      require-role.ts          # requireRole(): getClaims + profiles.role/is_active + aal2
+      safe-redirect.ts         # ?next= samo relativne putanje unutar /admin
+    security/
+      safe-href.ts             # linkovi samo http/https/mailto/tel
+      file-signature.ts        # provera potpisa slika i Excel fajlova
+      rate-limit.ts            # brojač u Postgres-u (HMAC ključevi)
+      turnstile.ts             # provera tokena (ODLUKA-2)
     booking/                   # statusi zahteva, dozvoljeni prelazi
     pdf/                       # React-PDF šabloni
     email/                     # Resend šabloni
@@ -164,7 +174,7 @@ src/
     supabase/
       server.ts                # server klijent (cookies)
       client.ts                # browser klijent
-      admin.ts                 # service role — import 'server-only'
+      admin.ts                 # secret ključ — import 'server-only'
       database.types.ts        # generisano, ne menjati ručno
   config/
     company.ts                 # podaci firme: PIB, MB, licenca, garancija, kontakt, račun
@@ -180,6 +190,7 @@ tests/
 docs/
   odluke.md                    # arhitektonske odluke (kratko, sa datumom)
   otvorena-pitanja.md          # sve što čeka odgovor od Halo-a
+  bezbednost.md                # plan bezbednosti; §17 = checklist po koraku Roadmap-a
 ```
 
 ---
@@ -300,6 +311,7 @@ Popusti i korekcije cena su odvojeni od izvora: primenjuju se u motoru nad cenom
 - **Rok važenja ponude bira osoblje pri slanju** (polje sa podrazumevanom vrednošću; `TODO(halo)`: podrazumevani rok).
 - Ponuda je snapshot (vidi „Pravila za cene“) i čuva tekst programa iz tog trenutka.
 - **Predračun je klasičan PDF:** podaci firme iz `src/config/company.ts`, broj računa, poziv na broj, iznos u EUR sa napomenom o plaćanju u dinarima. IPS QR kod je Faza 2.
+- Kupac dobija PDF ponude i predračuna **kao prilog mejla**, ne kao link. Signed URL (kratak rok) koristi samo osoblje u adminu.
 - `TODO(halo)`: obrasci ponude i predračuna koje danas koriste.
 
 ### Ključne odluke
@@ -404,13 +416,15 @@ O nama, Kontakt, Opšti uslovi, FAQ, Politika privatnosti. Tekstove čekamo od H
 - Sve izmene šeme isključivo kroz `npx supabase migration new`. Nikad ne menjaj već primenjenu migraciju; napravi novu.
 - Nikad ne menjaj šemu ručno kroz Studio na produkciji.
 - Posle svake migracije: `db reset` → `gen types` → `test db`.
-- **RLS je uključen na SVAKOJ tabeli.** Javno (anon) čitanje samo za objavljen sadržaj, objavljene verzije cenovnika i aktivne popuste. Anon sme samo da UBACI rezervacioni zahtev (kroz server, ne direktno). Pisanje ostalog samo prijavljene uloge, po tabeli iz „Uloge — ko sme šta“.
+- **RLS je uključen na SVAKOJ tabeli.** Javno (anon) čitanje samo za objavljen sadržaj i aktivne popuste (samo polja koja sajt prikazuje). Pisanje samo prijavljene uloge, po tabeli iz „Uloge — ko sme šta“.
+- **Anon nema pristup tabelama cena** dok se ne odluči ODLUKA-1 (`docs/bezbednost.md`; zavisi od toga da li Excel partnera sadrži netto cene). Kalkulator čita objavljeni cenovnik server-only, kroz `src/lib/pricing/load-published.ts`, i vraća samo rezultat motora. Cena „od“ je kolona na ponudi.
+- **Anon nema INSERT politiku nigde.** Rezervacioni zahtev upisuje server kroz `create_booking_request()` (`SECURITY DEFINER`, izvršiva samo za `service_role`), posle validacije i rate limita.
 - Uloge u `profiles.role`: `admin`, `sales` (prodaja), `editor` (urednik). Provera kroz SQL helper (npr. `has_role('sales')`).
 - **Storage:** `images` (javno čitanje; pisanje `editor`/`sales`/`admin`), `imports` (privatno; `sales`/`admin`), `documents` (privatno; `sales`/`admin`, pristup preko signed URL-a). Storage politike su takođe pokrivene pgTAP testovima.
-- Service role ključ koristi samo `src/lib/supabase/admin.ts`, koji počinje sa `import 'server-only'`.
+- Secret ključ (`sb_secret_…`) koristi samo `src/lib/supabase/admin.ts`, koji počinje sa `import 'server-only'`.
 - Integritet čuva baza: FK, CHECK, UNIQUE; promena statusa samo kroz funkciju koja proverava prelaz. U Fazi 2 kapaciteti preko exclusion constraint-a (`btree_gist`).
 - Region: Frankfurt (eu-central-1); Vercel funkcije u `fra1`.
-- **Supabase MCP:** na lokalnu/dev bazu slobodno; na produkciju SAMO read-only. Nikad `db reset`, `DELETE`, `DROP` ili `TRUNCATE` na produkciji.
+- **Supabase MCP:** samo lokalna ili dev baza (read-only, ograničen na dev projekat). **Ne povezivati ga sa produkcijom u MVP-u** (lični podaci + prompt injection kroz napomene kupaca, Word tekst i Excel ćelije). Nikad `db reset`, `DELETE`, `DROP` ili `TRUNCATE` na produkciji.
 
 ---
 
@@ -419,7 +433,9 @@ O nama, Kontakt, Opšti uslovi, FAQ, Politika privatnosti. Tekstove čekamo od H
 Pre pisanja koda za keširanje, rute, proxy ili server actions, pročitaj odgovarajući vodič u `node_modules/next/dist/docs/`; tamo je merodavna verzija (16.4), ne sećanje.
 - Server Components po defaultu; `"use client"` samo za interakciju (kalkulator, forme, filteri, editor, galerija).
 - Keširanje je opt-in (`cacheComponents: true`): katalog i stranice ponuda koriste `"use cache"` + `cacheTag(...)` (npr. `offers`, `offer:<id>`, `price-list:<id>`, `discounts`). Posle „Objavi“ (sadržaja, cenovnika ili popusta) osveži oznake (`updateTag` / `revalidateTag(tag, profile)`; drugi argument je obavezan u v16).
-- Zaštita `/admin` ide kroz `src/proxy.ts` (ne `middleware.ts`, zastareo u v16).
+- Zaštita `/admin` ide kroz `src/proxy.ts` (ne `middleware.ts`, zastareo u v16). `proxy.ts` samo preusmerava na prijavu (matcher samo `/admin` i prijava) i nikad nije jedina zaštita: admin layout i **svaka** server akcija i funkcija za podatke same zovu `requireRole()`.
+- Na serveru identitet uvek kroz `supabase.auth.getClaims()`, nikad `getSession()`.
+- CSP: strogi sa nonce-om na `/admin` (iz `proxy.ts`), statički bez nonce-a na javnom sajtu (iz `next.config.ts`, zbog `"use cache"`). Prvo `Report-Only`.
 - `params`, `searchParams`, `cookies()`, `headers()` su async: uvek `await`.
 - `next/image` sa `images.remotePatterns` za Supabase Storage domen (ne `images.domains`).
 - Server actions: zod validacija ulaza → provera uloge → tipizovan rezultat `{ ok: true, data } | { ok: false, error }`. Nikad ne veruju klijentu.
@@ -449,11 +465,11 @@ Pre pisanja koda za keširanje, rute, proxy ili server actions, pročitaj odgova
 
 ## Bezbednost i lični podaci
 
-- Forma zahteva: zod validacija, honeypot polje, rate limit po IP-u.
-- Upload slika: proveri MIME tip i veličinu i na klijentu i u Storage politici; ime fajla uvek generiši (uuid), nikad ne koristi ime koje je poslao korisnik.
+- Forma zahteva: zod validacija, honeypot polje, rate limit po IP-u i po mejlu (Turnstile po ODLUKA-2).
+- Upload slika: MIME i veličinu proveri na klijentu i kroz podešavanja bucketa (`allowed_mime_types`, `file_size_limit`), a pravi sadržaj kroz proveru potpisa fajla na serveru (Storage politika ne vidi sadržaj). Ime fajla uvek generiši (uuid), nikad ne koristi ime koje je poslao korisnik. Bez SVG-a.
 - Lični podaci (imena, uzrast/datumi rođenja dece, telefon, mejl) samo u tabelama sa RLS. **Ne logovati lične podatke.**
 - MVP NE prikuplja slike pasoša.
-- PDF dokumenti u privatnom bucketu; pristup samo preko signed URL-a sa kratkim rokom.
+- PDF dokumenti u privatnom bucketu; osoblje pristupa preko signed URL-a sa kratkim rokom, kupac dobija PDF kao prilog mejla.
 - Tajne samo u env promenljivim; `.env*` nikad u git.
 
 ---
@@ -505,6 +521,8 @@ Ovo su smernice za razvoj, ne pravni savet. Pravnik klijenta proverava pre Faze 
 
 Redosled je prilagođen tome da pravi Excel fajlovi, formula cene i stari obračuni još nisu stigli: prvo radimo sve što od njih ne zavisi.
 
+Uz svaki korak ide i bezbednosni checklist iz `docs/bezbednost.md` §17; štiklira se zajedno sa korakom.
+
 ### MVP
 **A. Temelji**
 - [ ] 1. Inicijalizacija: prebacivanje u `src/`, shadcn, lokalni Supabase, Vitest, Playwright, skripte (`typecheck`, `test`, `test:golden`, `test:e2e`), GitHub remote, Vercel preview (`fra1`)
@@ -533,7 +551,7 @@ Redosled je prilagođen tome da pravi Excel fajlovi, formula cene i stari obrač
 - [ ] 3b. Cenovni motor (Egipat) + golden testovi + fast-check; cena „od“
 - [ ] 4. Parser + profil egipatskog partnera (pravi fixture fajlovi)
 - [ ] 5. Diff između verzija (dodato / promenjeno / uklonjeno / stop sale / korekcije)
-- [ ] 6. Tok u bazi: nacrt → objava u transakciji, Storage upload
+- [ ] 6. Tok u bazi: nacrt → objava u transakciji, „Vrati prethodnu verziju“, Storage upload
 - [ ] 8e. Ručni unos cena (Grčka), čeka model cene za Grčku
 - [ ] 8f. Popusti (early booking / first minute) i korekcije cena u adminu
 - [ ] 9. Ekran za uvoz: upload, pregled razlika, „Objavi“
@@ -587,11 +605,32 @@ Detalji i odgovori se vode u `docs/otvorena-pitanja.md`. Najvažnija:
 ```bash
 NEXT_PUBLIC_SITE_URL=
 NEXT_PUBLIC_SUPABASE_URL=
-NEXT_PUBLIC_SUPABASE_ANON_KEY=        # ili novi publishable key
-SUPABASE_SERVICE_ROLE_KEY=            # samo server (lib/supabase/admin.ts)
-RESEND_API_KEY=
-EMAIL_FROM=                           # npr. rezervacije@halotravel.rs (posle DNS verifikacije)
-EMAIL_STAFF_INBOX=                    # zajednički inbox za obaveštenja o zahtevima
-NEXT_PUBLIC_GA_ID=                    # učitava se tek posle pristanka
-NEXT_PUBLIC_META_PIXEL_ID=            # učitava se tek posle pristanka
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=   # sb_publishable_...
+SUPABASE_SECRET_KEY=                    # sb_secret_..., samo src/lib/supabase/admin.ts
+RESEND_API_KEY=                         # samo slanje, ograničen na domen
+EMAIL_FROM=                             # npr. rezervacije@halotravel.rs (posle DNS verifikacije)
+EMAIL_STAFF_INBOX=                      # zajednički inbox za obaveštenja o zahtevima
+NEXT_PUBLIC_TURNSTILE_SITE_KEY=         # ODLUKA-2
+TURNSTILE_SECRET_KEY=                   # ODLUKA-2
+RATE_LIMIT_SECRET=                      # HMAC za IP i mejl u brojaču
+NEXT_PUBLIC_GA_ID=                      # učitava se tek posle pristanka
+NEXT_PUBLIC_META_PIXEL_ID=              # učitava se tek posle pristanka
 ```
+
+Preview i produkcija imaju odvojene ključeve; preview nikad ne dobija produkcione.
+
+---
+
+## Bezbednost (detalji: docs/bezbednost.md)
+
+Pre rada na prijavi, ulogama, RLS-u, migracijama, uploadu, Excel uvozu, formi zahteva, mejlovima ili headerima pročitaj `docs/bezbednost.md`.
+- Server akcija / route handler: zod (`.strict()`) → `requireRole()` → posao → `audit_log`. `proxy.ts` samo preusmerava (matcher `/admin`).
+- Na serveru `getClaims()`, nikad `getSession()`. Uloga i `is_active` se čitaju iz `profiles` pri svakom zahtevu.
+- Nova tabela: RLS + politike po operaciji i ulozi + pgTAP. Nova `SECURITY DEFINER` funkcija: `set search_path = ''`, provera uloge unutar funkcije, `revoke execute ... from public, anon`. View: `with (security_invoker = true)`.
+- Anon: samo SELECT objavljenog sadržaja, nikad INSERT. Cene po ODLUKA-1.
+- Secret ključ samo u `src/lib/supabase/admin.ts`.
+- Bez `dangerouslySetInnerHTML` (izuzetak: JSON-LD komponenta). Linkovi samo `http`/`https`/`mailto`/`tel`.
+- Upload: provera potpisa fajla na serveru, uuid imena, bez SVG-a.
+- `"use cache"` samo za javne podatke.
+- Lični podaci ne idu u logove, URL-ove, analitiku ni AI alate.
+- RLS, GRANT-ove, Storage politike i Auth podešavanja ne menjaj bez testa i bez da korisnik pregleda izmenu.
