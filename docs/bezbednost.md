@@ -9,7 +9,8 @@
 ## 0. Kako se koristi ovaj fajl
 
 - Pre svakog koraka iz Roadmap-a otvori sekciju 17 (plan po koracima) i štikliraj stavke za taj korak.
-- Claude Code: kratka pravila idu u `CLAUDE.md` (Prilog A). Ovaj fajl čita pre rada na prijavi, ulogama, RLS-u, migracijama, uploadu, Excel uvozu, formi zahteva, mejlovima i headerima.
+- Claude Code: kratka pravila su već u `CLAUDE.md` (sekcija „Bezbednost“). Ovaj fajl čita pre rada na prijavi, ulogama, RLS-u, migracijama, uploadu, Excel uvozu, formi zahteva, mejlovima i headerima.
+- Prilozi B–D (skice koda, SQL, env promenljive) su u `docs/bezbednost-prilozi.md`. Kad dođe odgovarajući korak, kod ide u pravi repo (tamo ga čuvaju testovi), a skica se briše iz priloga.
 - Oznake: `ODLUKA-n` je odluka koja čeka; `TODO(halo)` i `TODO(itum)` znače isto kao u `CLAUDE.md`.
 - Kad se nešto promeni, ažuriraj ovaj fajl i upiši odluku u `docs/odluke.md`.
 - Skice koda u prilozima su polazna tačka. Tipove i API-je proveri u `node_modules/` pre upotrebe (isto pravilo kao u `CLAUDE.md`).
@@ -74,6 +75,7 @@
 - [ ] Minimalna dužina lozinke 12. Zaštita od procurelih lozinaka ako je dostupna na planu (proveriti na Pro).
 - [ ] Turnstile CAPTCHA na prijavi i resetu lozinke (Supabase Auth ga podržava). Zavisi od ODLUKA-2.
 - [ ] Pregledani rate limiti za Auth endpoint-e u Supabase podešavanjima.
+- [ ] Bez enumeracije naloga: prijava i reset lozinke vraćaju isti opšti odgovor („Pogrešan mejl ili lozinka“, „Ako nalog postoji, poslali smo mejl“) i za postojeći i za nepostojeći mejl, bez vidljive razlike u vremenu odgovora. Registracije nema, pa je poziv osoblja jedini način da nalog nastane.
 - [ ] Sopstveni SMTP (Resend) za mejlove Auth-a (poziv, reset). Podrazumevani Supabase SMTP nije za produkciju.
 - [ ] Site URL i Redirect URLs: samo produkcioni domen i tačan obrazac preview adresa ovog projekta. Nikad `https://*.vercel.app/**`.
 - [ ] Asimetrični JWT ključevi za potpisivanje uključeni (tada `getClaims()` proverava potpis lokalno, bez poziva Auth serveru).
@@ -84,6 +86,11 @@
 - Sprovodi se na dva mesta:
   - u aplikaciji: `requireRole()` odbija ako `aal !== 'aal2'` i šalje na ekran za MFA,
   - u bazi: RESTRICTIVE politika na svakoj tabeli i na `storage.objects` za `authenticated` (Prilog C.2).
+- **Upis prvog faktora (enrollment).** Nov korisnik posle prve prijave ima `aal1` i nema faktor, pa restrictive aal2 politike blokiraju sve tabele, uključujući `profiles`. Zato:
+  - postoji jedna `aal1` stranica `/admin/mfa` koja zove samo `supabase.auth.mfa.*` (enroll, challenge, verify) i ne čita nijednu tabelu,
+  - `requireRole()` proverava `aal` iz `getClaims()` **pre** bilo kog čitanja `profiles` i vraća `mfa_required` (vodi na `/admin/mfa`),
+  - restrictive politike važe samo za tabele i Storage, ne i za Auth API, pa upis faktora radi pri `aal1`,
+  - posle upisa i potvrde koda sesija dobija `aal2` i tek tada se čita profil.
 - Izgubljen telefon: samo admin resetuje faktor drugom korisniku, posle provere uživo ili telefonom, uz upis u `audit_log`. Ako admin izgubi pristup, Predrag resetuje preko Supabase dashboarda.
 
 ### 3.3 Provera identiteta na serveru
@@ -133,6 +140,12 @@ Tabela „Uloge — ko sme šta" iz `CLAUDE.md` važi. Dodaci:
   - `booking_events` i `audit_log`: samo INSERT, bez UPDATE i DELETE za bilo koju ulogu,
   - redovi objavljenog cenovnika se ne menjaju; nova verzija = novi uvoz; korekcije su zasebna tabela.
 - Supabase Security Advisor (dashboard) bez upozorenja pre svakog merge-a koji menja bazu i pre lansiranja.
+- **Površina Data API-ja.** Svaka uključena Supabase usluga je dodatna ulazna tačka za nekoga sa publishable ključem:
+  - `pg_graphql` je podrazumevano uključen i izlaže šemu (introspekciju) preko `/graphql/v1`; ako ga ne koristimo, isključiti ekstenziju,
+  - Realtime isključiti (ili ostaviti bez ijedne tabele u publikaciji) dok ga ne koristimo,
+  - izložena samo šema `public` (Data API → Exposed schemas); `private` nikad,
+  - `db-extra-search-path` ostaje na podrazumevanoj vrednosti, bez dodatnih šema,
+  - ručna provera pre lansiranja: `curl` sa publishable ključem na `/graphql/v1` mora da vrati grešku.
 
 ### 4.4 Javni (anon) pristup — konačna lista
 
@@ -206,7 +219,7 @@ Vercel funkcije nemaju zajedničku memoriju, pa brojač ne može biti u promenlj
   - `zahtev:mejl:<hmac>` — npr. 3 na 24 h (štiti tuđe inboxe),
   - `kalkulator:ip:<hmac>` — npr. 120 na minut.
 - IP i mejl se ne čuvaju sirovi, nego kao HMAC-SHA256 sa tajnom `RATE_LIMIT_SECRET`. Redovi stariji od 48 h se brišu.
-- IP na Vercelu se čita iz `x-forwarded-for` (prva vrednost), koji postavlja platforma. Proveriti u Vercel dokumentaciji.
+- **IP adresa je obavezna stavka koraka 14, ne preporuka.** `x-forwarded-for` klijent može da lažira ako ga platforma samo dopuni, pa bi napadač svakim zahtevom menjao ključ brojača. Pre pisanja `rate-limit.ts` u Vercel dokumentaciji potvrditi koji header platforma sama postavlja i prepisuje (`x-real-ip` ili `x-vercel-forwarded-for`), i čitati samo njega. Test: zahtev sa lažnim `x-forwarded-for` ne menja ključ. Dok se ne potvrdi, brojač po IP-u ne vredi, pa se oslanjamo na limit po mejlu i WAF.
 - Brojevi su početni predlog i podešavaju se posle prvih nedelja rada.
 
 ### 6.4 Mejl
@@ -244,7 +257,7 @@ Vercel funkcije nemaju zajedničku memoriju, pa brojač ne može biti u promenlj
 
 ### 7.3 Dokumenti (bucket `documents`)
 - Privatan, samo sales/admin. Osoblje pristupa preko signed URL-a kratkog roka (npr. 60 s).
-- Kupac dobija PDF ponude i predračuna **kao prilog mejla**, ne kao signed URL. Kratak rok bi istekao pre nego što kupac otvori mejl, a dug rok je javni link do ličnih podataka. Primenjeno u `CLAUDE.md` (§18, tačka 4).
+- Kupac dobija PDF ponude i predračuna **kao prilog mejla**, ne kao signed URL. Kratak rok bi istekao pre nego što kupac otvori mejl, a dug rok je javni link do ličnih podataka. Primenjeno u `CLAUDE.md` („Ponuda i predračun“).
 
 ---
 
@@ -253,6 +266,7 @@ Vercel funkcije nemaju zajedničku memoriju, pa brojač ne može biti u promenlj
 - Pre parsiranja proveri potpis fajla: `.xlsx` je ZIP (`50 4B 03 04`), `.xls` je OLE2 (`D0 CF 11 E0 A1 B1 1A E1`). SheetJS sam prepoznaje i druge formate (CSV, HTML, SYLK...), pa bi bez ove provere prihvatio i HTML preimenovan u `.xls`.
 - SheetJS opcije čitanja: bez generisanja HTML-a iz ćelija (`cellHTML: false`), bez formula (`cellFormula: false`), bez VBA (podrazumevano isključeno), limit redova (`sheetRows`), `dense: true`. Formule se nikad ne izvršavaju, čitaju se samo sačuvane vrednosti. Tačna imena opcija proveriti u dokumentaciji verzije 0.20.3.
 - Ograničenja: veličina fajla, broj listova, broj redova, `maxDuration` route handlera. Prekoračenje daje jasnu grešku, nikad tihu obradu dela fajla.
+- **Zip bomb.** `.xlsx` je ZIP, pa mali fajl (limit 15 MB) može da se raspakuje u gigabajte i sruši funkciju pre nego što limit redova išta znači. Pre SheetJS-a pročitati ZIP direktorijum (bez raspakivanja) i odbiti fajl ako zbir `uncompressed size` zapisa, broj zapisa ili odnos kompresije prelaze limit (konkretne brojeve podesiti na pravim fajlovima). `sheetRows` ograničava redove, ali ne štiti od ogromnog raspakovanog XML-a. Za `.xls` (OLE2) važi samo limit veličine i `maxDuration`.
 - Svaka ćelija je nepouzdan ulaz: zod validacija (brojevi u opsegu, ispravni datumi, nazivi ograničene dužine).
 - Bez `eval` i bez dinamičkih ključeva iz ćelija (`obj[vrednostCelije] = ...`), zbog prototype pollution-a. Koristiti `Map` ili `Object.create(null)`.
 - Provere pre „Objavi" (štite od pokvarenog fajla i od greške u profilu):
@@ -335,7 +349,7 @@ U `next.config.ts` kroz `headers()` (Prilog B.5): `X-Content-Type-Options`, `Ref
 ## 13. AI alati (Claude Code, MCP)
 
 - `.claude/settings.json` u repou (Prilog B.7): zabrana čitanja `.env` fajlova, potvrda za `git push`, zabrana komandi nad produkcijom. Proveriti u dokumentaciji Claude Code-a kako se pravila primenjuju na Bash komande.
-- Supabase MCP: samo lokalna ili dev baza, u read-only režimu i ograničen na dev projekat. **Ne povezivati ga sa produkcijom u MVP-u** (predlog izmene sekcije 11 u `CLAUDE.md`). Napomena kupca, tekst iz Worda i Excel ćelije mogu sadržati „uputstva" za agenta (prompt injection), a produkcija sadrži lične podatke.
+- Supabase MCP: samo lokalna ili dev baza, u read-only režimu i ograničen na dev projekat. **Ne povezivati ga sa produkcijom u MVP-u** (primenjeno u `CLAUDE.md`, „Baza i Supabase“). Napomena kupca, tekst iz Worda i Excel ćelije mogu sadržati „uputstva" za agenta (prompt injection), a produkcija sadrži lične podatke.
 - **ODLUKA-3:** kad Claude Code čita `tests/fixtures/`, sadržaj pravih Excel fajlova i starih obračuna ide modelu. Potvrditi sa Halo-om da je to u redu, ili raditi sa anonimizovanim kopijama gde je moguće. Proveriti podešavanja privatnosti naloga.
 - Svaku migraciju, RLS politiku, GRANT, Storage politiku i `SECURITY DEFINER` funkciju koju napiše AI čovek pregleda liniju po liniju. Tipične greške: `using (true)`, zaboravljen `revoke`, politika za pogrešnu ulogu, `security definer` bez `search_path`.
 - Lični podaci kupaca nikad ne idu u prompt, chat, issue ni log.
@@ -373,7 +387,16 @@ Statusi zahteva već idu u `booking_events`, a prijave beleži Supabase Auth.
 - Test vraćanja pre lansiranja, pa bar jednom u 3 meseca (baza + fajlovi, u odvojen projekat).
 - Tokom razvoja: `supabase db dump` po potrebi; pravih podataka ionako nema.
 
-### 15.3 Runbook (`docs/runbook.md`, kratko)
+### 15.3 Monitoring i alarmi
+Runbook reaguje, ali neko mora da primeti incident. Minimum pre lansiranja:
+- **Prijave (Supabase Auth logovi):** alarm na veći broj neuspelih prijava u kratkom roku, na prijavu sa novog uređaja za admina i na reset MFA faktora.
+- **Forma zahteva:** alarm na skok broja zahteva ili odbijenih zahteva (rate limit, honeypot, Turnstile) u odnosu na uobičajeno.
+- **Greške:** Vercel log drain ili alert na skok 5xx i grešaka server akcija; Supabase alert na greške funkcija i skok 401/403 na `/rest/v1/`.
+- **Poslovni događaji:** `audit_log` događaji „objava cenovnika“ i „promena uloge“ šalju kratko obaveštenje adminu (mejl), da se pogrešna objava vidi odmah.
+- Obaveštenja idu na adresu koja nije zajednički inbox sa ličnim podacima. TODO(itum): ko ih prima i ko reaguje van radnog vremena.
+- Alarmi ne sadrže lične podatke (samo broj, vreme, ID).
+
+### 15.4 Runbook (`docs/runbook.md`, kratko)
 
 | Situacija | Prvi koraci |
 |---|---|
@@ -383,6 +406,8 @@ Statusi zahteva već idu u `booking_events`, a prijave beleži Supabase Auth.
 | Talas spama na formi | pooštriti WAF pravilo ili uključiti Attack Challenge Mode na Vercelu, sniziti limite |
 | Curenje ličnih podataka | zaustaviti curenje, sačuvati dokaze, obavestiti Baneta i Stefana, pravnik → Poverenik |
 | Kompromitovana zavisnost | vratiti prethodnu verziju, rotirati ključeve koje je build video |
+| Alarm: neuspele prijave ili nova prijava admina | proveriti u Auth logu da li je to osoblje; ako nije, postupak za ukraden nalog |
+| Alarm: skok zahteva ili grešaka | proveriti da li je napad (WAF, rate limit) ili greška posle deploy-a; po potrebi vratiti prethodni deploy |
 
 Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni i ko menja koga.
 
@@ -406,7 +431,10 @@ Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni 
 - [ ] Storage: anon i editor ne čitaju `imports` i `documents`; upload u `images` van `offers/` je odbijen; prepisivanje fajla je odbijeno
 
 ### Vitest
-- [ ] `safeRedirectPath` i `safeHref`, uključujući `javascript:`, `  javascript:`, `java\tscript:`, `data:`, `//evil.com`
+- [ ] `safeRedirectPath` i `safeHref`, uključujući `javascript:`, `  javascript:`, `java\tscript:`, `data:`, `//evil.com`, `/administrator`, `/admin.evil`, `/admin/..//evil.com`
+- [ ] rate limit: zahtev sa lažnim `x-forwarded-for` ne menja ključ brojača
+- [ ] prijava i reset lozinke: isti odgovor za postojeći i nepostojeći mejl
+- [ ] Excel: ZIP sa premalim fajlom a ogromnim raspakovanim sadržajem se odbija pre parsiranja
 - [ ] Tiptap validator odbija nepoznate čvorove i loše linkove; renderer ne prikazuje loš link
 - [ ] zod šema forme: granice; `.strict()` odbija višak polja
 - [ ] provera potpisa slika i Excel fajlova: pravi fajl, preimenovan HTML, prazan fajl
@@ -414,12 +442,15 @@ Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni 
 
 ### Playwright
 - [ ] `/admin` bez prijave vodi na prijavu; posle lozinke bez MFA vodi na MFA ekran i ne prikazuje podatke
+- [ ] korisnik bez upisanog faktora stiže do `/admin/mfa`, upiše faktor i tek tada dobija pristup podacima
 - [ ] direktan poziv admin server akcije bez sesije je odbijen
 - [ ] forma: popunjen honeypot ne pravi zapis; prekoračen limit daje poruku; bez Turnstile tokena zahtev je odbijen
 
 ### Ručno pre lansiranja
 - [ ] Supabase Security Advisor bez upozorenja
 - [ ] `curl` sa publishable ključem na svaku tabelu i RPC funkciju: prazno ili greška tamo gde treba
+- [ ] `curl` sa publishable ključem na `/graphql/v1` i Realtime: greška (isključeni)
+- [ ] alarmi iz 15.3 podešeni i probani (lažna neuspela prijava daje obaveštenje)
 - [ ] provera headera (npr. Mozilla Observatory)
 - [ ] pretraga build-a za tajnama
 - [ ] test vraćanja backup-a
@@ -436,6 +467,7 @@ Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni 
 - [ ] `.claude/settings.json` (Prilog B.7)
 - [ ] Vercel: proverena Deployment Protection, env promenljive po okruženju, region `fra1`
 - [ ] Supabase: dev projekat odvojen od budućeg produkcionog; `enable_signup = false`; novi API ključevi
+- [ ] Supabase: `pg_graphql` i Realtime isključeni ako se ne koriste; izložena samo šema `public`
 - [ ] Osnovni security headeri (CSP kasnije)
 - [ ] ESLint: `react/no-danger` kao greška
 - [ ] SheetJS sa CDN-a ili iz `vendor/`, upisano u `docs/odluke.md`
@@ -456,6 +488,8 @@ Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni 
 
 ### Korak 7 — Prijava, uloge, RLS
 - [ ] Prijava + TOTP MFA (upis faktora i provera); Turnstile na prijavi i resetu
+- [ ] `aal1` stranica `/admin/mfa` za upis prvog faktora (ne čita tabele); `requireRole()` proverava `aal` pre čitanja `profiles`
+- [ ] Prijava i reset lozinke: isti odgovor za postojeći i nepostojeći mejl
 - [ ] `requireRole()` i `safeRedirectPath()`
 - [ ] Admin layout i svaka akcija proveravaju ulogu; `proxy.ts` samo preusmerava, matcher samo `/admin`
 - [ ] Poziv osoblja (samo admin), deaktivacija, reset MFA
@@ -470,6 +504,7 @@ Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni 
 
 ### Koraci 4–6 i 9 — Excel uvoz (kad se odblokira)
 - [ ] Provera potpisa fajla, opcije SheetJS-a, limiti, zod po ćeliji
+- [ ] Zip bomb: provera ZIP direktorijuma (raspakovana veličina, broj zapisa, odnos kompresije) pre SheetJS-a
 - [ ] Provere pre objave; zaštita od istovremene objave
 - [ ] „Objavi" i „Vrati prethodnu verziju" u bazi, sa proverom uloge i `audit_log`
 - [ ] Bucket `imports` bez UPDATE/DELETE
@@ -484,6 +519,7 @@ Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni 
 ### Koraci 13–14 — Zahtev
 - [ ] `create_booking_request()` samo za `service_role`; anon bez INSERT-a
 - [ ] zod granice, honeypot, Turnstile, rate limit (IP + mejl), WAF pravilo
+- [ ] IP za rate limit iz headera koji Vercel sam postavlja (potvrđeno u dokumentaciji), ne iz slobodnog `x-forwarded-for`; test sa lažnim headerom
 - [ ] Mejl bez slobodnog teksta, subject bez korisničkog unosa; SPF/DKIM/DMARC
 - [ ] Statusi kroz funkciju; `booking_events` samo INSERT
 
@@ -497,31 +533,13 @@ Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni 
 - [ ] Vercel Pro + WAF pravila; Supabase Pro + backup + kopija Storage-a + test vraćanja
 - [ ] Novi ključevi za produkciju; razvojni se ne prenose
 - [ ] Runbook, kontakti, postupak kad zaposleni ode
+- [ ] Monitoring i alarmi iz 15.3 podešeni i probani
 - [ ] Ručne provere iz sekcije 16
 - [ ] Uputstvo za osoblje: lozinke, MFA, lažni mejlovi (npr. „cenovnik od partnera" u prilogu sa sumnjive adrese)
 
 ---
 
-## 18. Predlozi izmena `CLAUDE.md`
-
-**Status: primenjeno 22.10.2026.** Brojevi su iz ranije verzije; u zagradi je naziv sekcije u `CLAUDE.md`.
-
-1. **Sekcija 11 („Baza i Supabase“), RLS:** „javno čitanje objavljene verzije cenovnika" zavisi od ODLUKA-1; do tada anon nema pristup cenama.
-2. **Sekcija 11 („Baza i Supabase“):** „Anon sme samo da UBACI rezervacioni zahtev (kroz server)" → „Anon nema INSERT politiku; zahtev upisuje server kroz `create_booking_request()`".
-3. **Sekcija 11 („Baza i Supabase“), Supabase MCP:** „na produkciju SAMO read-only" → „ne povezivati sa produkcijom u MVP-u".
-4. **Sekcija 7 („Arhitektura“ → „Ponuda i predračun“):** kupac dobija PDF kao prilog mejla; signed URL samo za osoblje.
-5. **Sekcija 12 („Next.js 16 — pravila“):** dodati „`proxy.ts` samo preusmerava, matcher samo `/admin`; svaka akcija sama proverava ulogu (`requireRole`)" i „na serveru `getClaims()`, nikad `getSession()`".
-6. **Sekcija 13 („Next.js 16 — pravila“):** CSP strategija (nonce na `/admin`, statički CSP na javnom sajtu).
-7. **Sekcija 14 („Bezbednost i lični podaci“):** „proveri MIME tip i veličinu u Storage politici" → podešavanja bucketa (`allowed_mime_types`, `file_size_limit`) + provera potpisa na serveru, jer Storage politika ne vidi sadržaj fajla. Dodati Turnstile i limit po mejlu.
-8. **Sekcija 3 („Stack“):** Turnstile, ako ODLUKA-2 prođe.
-9. **Sekcija 18 („Roadmap“):** bezbednosne stavke po koracima iz sekcije 17; korak 6 dobija „Vrati prethodnu verziju".
-10. **Sekcija 20 („Promenljive okruženja“):** env promenljive iz Priloga D.
-11. **Sekcija 5 („Struktura projekta“):** `src/lib/auth/` (`require-role.ts`, `safe-redirect.ts`) i `src/lib/security/` (`safe-href.ts`, `file-signature.ts`, `rate-limit.ts`, `turnstile.ts`).
-12. **Kraj fajla:** kratka sekcija iz Priloga A.
-
----
-
-## 19. Otvorene odluke i pitanja
+## 18. Otvorene odluke i pitanja
 
 | Oznaka | Pitanje | Ko odlučuje |
 |---|---|---|
@@ -535,419 +553,6 @@ Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni 
 | TODO(halo) | Prag upozorenja za promenu cene pri uvozu (%) | Milica / Dimitrije |
 | TODO(itum) | Gde se čuvaju kopije Storage-a; ko prima obaveštenja o incidentima | Stefan |
 | TODO(itum) | Trajanje sesije osoblja | Stefan + Halo |
-
----
-
-## Prilog A — kratka sekcija za kraj `CLAUDE.md`
-
-```md
-## Bezbednost (detalji: docs/bezbednost.md)
-Pre rada na prijavi, ulogama, RLS-u, migracijama, uploadu, Excel uvozu, formi zahteva, mejlovima ili headerima pročitaj docs/bezbednost.md.
-- Server akcija / route handler: zod (.strict()) → requireRole() → posao → audit_log. proxy.ts samo preusmerava (matcher /admin).
-- Na serveru getClaims(), nikad getSession(). Uloga i is_active se čitaju iz profiles pri svakom zahtevu.
-- Nova tabela: RLS + politike po operaciji i ulozi + pgTAP. Nova SECURITY DEFINER funkcija: set search_path = '', provera uloge unutar funkcije, revoke execute from public, anon. View: with (security_invoker = true).
-- Anon: samo SELECT objavljenog sadržaja, nikad INSERT. Cene po ODLUKA-1.
-- Secret ključ samo u src/lib/supabase/admin.ts.
-- Bez dangerouslySetInnerHTML (izuzetak: JSON-LD komponenta). Linkovi samo http/https/mailto/tel.
-- Upload: provera potpisa fajla na serveru, uuid imena, bez SVG-a.
-- "use cache" samo za javne podatke.
-- Lični podaci ne idu u logove, URL-ove, analitiku ni AI alate.
-- RLS, GRANT-ove, Storage politike i Auth podešavanja ne menjaj bez testa i bez da korisnik pregleda izmenu.
-```
-
----
-
-## Prilog B — skice koda (TypeScript / konfiguracija)
-
-### B.1 `src/lib/auth/require-role.ts`
-```ts
-import 'server-only';
-import { cache } from 'react';
-import { createClient } from '@/lib/supabase/server';
-
-export type StaffRole = 'admin' | 'sales' | 'editor';
-
-type Denied = { ok: false; error: 'unauthenticated' | 'mfa_required' | 'forbidden' };
-type Allowed = {
-  ok: true;
-  userId: string;
-  role: StaffRole;
-  supabase: Awaited<ReturnType<typeof createClient>>;
-};
-
-// Jednom po zahtevu, da layout i funkcije za podatke ne ponavljaju upit.
-const loadStaff = cache(async () => {
-  const supabase = await createClient();
-  const { data, error } = await supabase.auth.getClaims();
-  const claims = data?.claims;
-  if (error || !claims) return { supabase, claims: null, profile: null };
-
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('role, is_active')
-    .eq('id', claims.sub)
-    .maybeSingle();
-
-  return { supabase, claims, profile };
-});
-
-export async function requireRole(allowed: StaffRole[]): Promise<Allowed | Denied> {
-  const { supabase, claims, profile } = await loadStaff();
-  if (!claims) return { ok: false, error: 'unauthenticated' };
-  if (claims.aal !== 'aal2') return { ok: false, error: 'mfa_required' };
-
-  const role = profile?.role as StaffRole | null | undefined;
-  if (!profile?.is_active || !role || !allowed.includes(role)) {
-    return { ok: false, error: 'forbidden' };
-  }
-  return { ok: true, userId: claims.sub, role, supabase };
-}
-```
-
-### B.2 Obrazac server akcije
-```ts
-'use server';
-import { z } from 'zod';
-import { updateTag } from 'next/cache';
-import { requireRole } from '@/lib/auth/require-role';
-
-const Input = z.object({ offerId: z.string().uuid() }).strict();
-
-export async function publishOffer(raw: unknown) {
-  // 1. ulaz
-  const parsed = Input.safeParse(raw);
-  if (!parsed.success) return { ok: false, error: 'Neispravni podaci.' } as const;
-
-  // 2. ko je i sme li
-  const staff = await requireRole(['editor', 'sales', 'admin']);
-  if (!staff.ok) return { ok: false, error: 'Nemate dozvolu za ovu akciju.' } as const;
-
-  // 3. posao kroz klijent prijavljenog korisnika: RLS i funkcija u bazi proveravaju ponovo
-  //    (funkcija publish_offer sama upisuje audit_log)
-  const { error } = await staff.supabase.rpc('publish_offer', { p_offer_id: parsed.data.offerId });
-  if (error) return { ok: false, error: 'Objava nije uspela. Pokušajte ponovo.' } as const;
-
-  // 4. keš
-  updateTag(`offer:${parsed.data.offerId}`);
-  updateTag('offers');
-  return { ok: true, data: null } as const;
-}
-```
-
-### B.3 `src/lib/auth/safe-redirect.ts`
-```ts
-export function safeRedirectPath(next: string | null | undefined, fallback = '/admin'): string {
-  if (!next) return fallback;
-  // samo naše admin putanje; odbij //host, /\host i apsolutne URL-ove
-  if (!next.startsWith('/admin') || next.startsWith('//') || next.includes('\\')) return fallback;
-  return next;
-}
-```
-
-### B.4 `src/lib/security/safe-href.ts`
-```ts
-const ALLOWED_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:']);
-
-export function safeHref(raw: unknown): string | null {
-  if (typeof raw !== 'string') return null;
-  const value = raw.trim();
-  if (value.length === 0 || value.length > 2048) return null;
-  try {
-    // relativne putanje se tumače kao https; javascript:, data:, vbscript: padaju
-    const url = new URL(value, 'https://halotravel.rs');
-    return ALLOWED_PROTOCOLS.has(url.protocol) ? value : null;
-  } catch {
-    return null;
-  }
-}
-```
-
-### B.5 Headeri u `next.config.ts` (deo)
-```ts
-import type { NextConfig } from 'next';
-
-const securityHeaders = [
-  { key: 'X-Content-Type-Options', value: 'nosniff' },
-  { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
-  { key: 'X-Frame-Options', value: 'DENY' },
-  { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=(), payment=(), usb=()' },
-  // includeSubDomains / preload tek posle provere DNS-a
-  { key: 'Strict-Transport-Security', value: 'max-age=31536000' },
-];
-
-const nextConfig: NextConfig = {
-  poweredByHeader: false,
-  async headers() {
-    return [
-      { source: '/:path*', headers: securityHeaders },
-      { source: '/admin/:path*', headers: [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }] },
-    ];
-  },
-};
-
-export default nextConfig;
-```
-
-### B.6 Skice CSP-a
-Domene GA4 i Meta piksela uzeti iz njihove dokumentacije. U razvoju Next.js traži i `'unsafe-eval'`.
-
-Javni sajt (statički, iz `next.config.ts`):
-```text
-default-src 'self';
-script-src 'self' 'unsafe-inline' <GA4> <META> https://challenges.cloudflare.com;
-style-src 'self' 'unsafe-inline';
-img-src 'self' data: blob: https://<ref>.supabase.co <GA4> <META>;
-font-src 'self';
-connect-src 'self' https://<ref>.supabase.co <GA4> <META>;
-frame-src https://challenges.cloudflare.com;
-frame-ancestors 'none';
-base-uri 'self';
-form-action 'self';
-object-src 'none';
-upgrade-insecure-requests;
-```
-
-Admin (nonce iz `proxy.ts`, novi za svaki zahtev):
-```text
-default-src 'self';
-script-src 'self' 'nonce-<NONCE>' 'strict-dynamic';
-style-src 'self' 'unsafe-inline';
-img-src 'self' data: blob: https://<ref>.supabase.co;
-connect-src 'self' https://<ref>.supabase.co wss://<ref>.supabase.co;
-frame-src https://challenges.cloudflare.com;
-frame-ancestors 'none';
-base-uri 'self';
-form-action 'self';
-object-src 'none';
-```
-
-### B.7 `.claude/settings.json`
-```json
-{
-  "permissions": {
-    "deny": [
-      "Read(./.env)",
-      "Read(./.env.local)",
-      "Read(./.env.*.local)",
-      "Read(./.env.production)",
-      "Bash(npx supabase db push:*)",
-      "Bash(npx supabase db reset --linked:*)",
-      "Bash(vercel --prod:*)",
-      "Bash(npx vercel --prod:*)"
-    ],
-    "ask": [
-      "Bash(git push:*)",
-      "Bash(npx supabase link:*)"
-    ]
-  }
-}
-```
-
----
-
-## Prilog C — skice SQL-a
-
-U primerima je `profiles.role` tipa `text` sa CHECK ograničenjem. Ako bude enum, dodati cast.
-
-### C.1 Šema `private` i `has_role`
-```sql
-create schema if not exists private;
-revoke all on schema private from public;
-grant usage on schema private to authenticated;
-
-create or replace function private.has_role(variadic roles text[])
-returns boolean
-language sql
-stable
-security definer
-set search_path = ''
-as $$
-  select exists (
-    select 1
-    from public.profiles p
-    where p.id = (select auth.uid())
-      and p.is_active
-      and p.role = any (roles)
-  );
-$$;
-
-revoke all on function private.has_role(text[]) from public;
-grant execute on function private.has_role(text[]) to authenticated;
-
--- primer politike
-create policy "prodaja čita zahteve"
-on public.booking_requests
-for select
-to authenticated
-using ((select private.has_role('sales', 'admin')));
-```
-
-### C.2 MFA (aal2) kao restrictive politika
-Restrictive politika sama ne daje pristup; samo sužava ono što daju obične (permissive) politike. Ponoviti za svaku tabelu i za `storage.objects`.
-```sql
-create policy "osoblje mora imati MFA"
-on public.booking_requests
-as restrictive
-for all
-to authenticated
-using ((select auth.jwt() ->> 'aal') = 'aal2');
-```
-
-### C.3 `profiles` — korisnik ne može da promeni svoju ulogu
-```sql
-alter table public.profiles enable row level security;
-
-revoke all on public.profiles from anon;
-revoke insert, update, delete on public.profiles from authenticated;
-grant update (full_name) on public.profiles to authenticated;
-
-create policy "korisnik vidi svoj profil"
-on public.profiles for select to authenticated
-using (id = (select auth.uid()));
-
-create policy "admin vidi sve profile"
-on public.profiles for select to authenticated
-using ((select private.has_role('admin')));
-
-create policy "korisnik menja svoje ime"
-on public.profiles for update to authenticated
-using (id = (select auth.uid()))
-with check (id = (select auth.uid()));
-```
-
-### C.4 `set_user_role` — jedini način promene uloge
-```sql
-create or replace function public.set_user_role(p_user_id uuid, p_role text, p_active boolean)
-returns void
-language plpgsql
-security definer
-set search_path = ''
-as $$
-declare
-  v_old text;
-begin
-  if not private.has_role('admin')
-     or (select auth.jwt() ->> 'aal') is distinct from 'aal2' then
-    raise exception 'forbidden' using errcode = '42501';
-  end if;
-
-  if p_role is not null and p_role not in ('admin', 'sales', 'editor') then
-    raise exception 'invalid role' using errcode = '22023';
-  end if;
-
-  select p.role into v_old
-  from public.profiles p
-  where p.id = p_user_id
-  for update;
-
-  if not found then
-    raise exception 'profile not found' using errcode = 'P0002';
-  end if;
-
-  -- sistem ne sme ostati bez aktivnog admina
-  if v_old = 'admin'
-     and (p_role is distinct from 'admin' or not p_active)
-     and (select count(*) from public.profiles where role = 'admin' and is_active) <= 1 then
-    raise exception 'last admin' using errcode = '23514';
-  end if;
-
-  update public.profiles
-     set role = p_role, is_active = p_active
-   where id = p_user_id;
-
-  insert into public.audit_log (actor_id, action, entity, entity_id, details)
-  values ((select auth.uid()), 'user.role_changed', 'profile', p_user_id,
-          jsonb_build_object('from', v_old, 'to', p_role, 'active', p_active));
-end;
-$$;
-
-revoke all on function public.set_user_role(uuid, text, boolean) from public, anon;
-grant execute on function public.set_user_role(uuid, text, boolean) to authenticated;
-```
-
-### C.5 pgTAP — strukturne provere
-```sql
-begin;
-select plan(3);
-
-select is(
-  (select count(*)::int
-     from pg_tables
-    where schemaname = 'public' and not rowsecurity),
-  0,
-  'RLS je uključen na svim tabelama u public'
-);
-
-select is(
-  (select count(*)::int
-     from pg_proc p
-     join pg_namespace n on n.oid = p.pronamespace
-    where n.nspname = 'public'
-      and p.prosecdef
-      and has_function_privilege('anon', p.oid, 'EXECUTE')
-      and not exists (            -- preskoči funkcije iz ekstenzija
-        select 1 from pg_depend d
-        where d.objid = p.oid and d.deptype = 'e'
-      )),
-  0,
-  'anon ne može da izvrši nijednu SECURITY DEFINER funkciju u public'
-);
-
-select is(
-  (select count(*)::int
-     from pg_class c
-     join pg_namespace n on n.oid = c.relnamespace
-    where n.nspname = 'public'
-      and c.relkind = 'v'
-      and coalesce(array_to_string(c.reloptions, ','), '') !~ 'security_invoker=(true|on|1)'),
-  0,
-  'svi view-ovi u public su security_invoker'
-);
-
-select * from finish();
-rollback;
-```
-
-Primer testa po ulozi:
-```sql
-set local role anon;
-select throws_ok(
-  'select id from public.booking_requests',
-  '42501',
-  null,
-  'anon nema pristup zahtevima'
-);
-reset role;
-
--- prijavljen korisnik: postavi claims pa ulogu
-select set_config(
-  'request.jwt.claims',
-  '{"sub":"<uuid-editora>","role":"authenticated","aal":"aal2"}',
-  true
-);
-set local role authenticated;
-select is_empty('select id from public.booking_requests', 'editor ne vidi zahteve');
-reset role;
-```
-
----
-
-## Prilog D — predlog env promenljivih
-
-```text
-NEXT_PUBLIC_SITE_URL=
-NEXT_PUBLIC_SUPABASE_URL=
-NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=   # sb_publishable_...
-SUPABASE_SECRET_KEY=                    # sb_secret_..., samo src/lib/supabase/admin.ts
-RESEND_API_KEY=                         # samo slanje, ograničen na domen
-EMAIL_FROM=
-EMAIL_STAFF_INBOX=
-NEXT_PUBLIC_TURNSTILE_SITE_KEY=         # ODLUKA-2
-TURNSTILE_SECRET_KEY=                   # ODLUKA-2
-RATE_LIMIT_SECRET=                      # HMAC za IP i mejl u brojaču
-NEXT_PUBLIC_GA_ID=                      # učitava se tek posle pristanka
-NEXT_PUBLIC_META_PIXEL_ID=              # učitava se tek posle pristanka
-```
 
 ---
 
