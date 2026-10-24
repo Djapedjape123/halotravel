@@ -1,7 +1,7 @@
 # Bezbednost — Halo Travel platforma
 
 > Plan bezbednosti za razvoj i lansiranje. Dopuna za `CLAUDE.md`, čuva se kao `docs/bezbednost.md`.
-> Verzija 1 · 21.10.2026 · Predrag Radić (prWeb)
+> Verzija 2 · 24.10.2026 · Predrag Radić (prWeb). Verzija 2 unosi nalaze spoljnog pregleda plana: GRANT model, opoziv sesije, nonce CSP i Cache Components, offboarding, `set_user_role`, `create_booking_request`, Storage politike.
 > Ovo su tehničke smernice, ne pravni savet. Pravna pitanja (ZZPL, rokovi čuvanja, obrađivači) proverava pravnik klijenta.
 
 ---
@@ -78,8 +78,10 @@
 - [ ] Bez enumeracije naloga: prijava i reset lozinke vraćaju isti opšti odgovor („Pogrešan mejl ili lozinka“, „Ako nalog postoji, poslali smo mejl“) i za postojeći i za nepostojeći mejl, bez vidljive razlike u vremenu odgovora. Registracije nema, pa je poziv osoblja jedini način da nalog nastane.
 - [ ] Sopstveni SMTP (Resend) za mejlove Auth-a (poziv, reset). Podrazumevani Supabase SMTP nije za produkciju.
 - [ ] Site URL i Redirect URLs: samo produkcioni domen i tačan obrazac preview adresa ovog projekta. Nikad `https://*.vercel.app/**`.
-- [ ] Asimetrični JWT ključevi za potpisivanje uključeni (tada `getClaims()` proverava potpis lokalno, bez poziva Auth serveru).
-- [ ] Trajanje sesije (ograničenje trajanja i odjava posle neaktivnosti) ako plan dozvoljava, npr. 12 h / 2 h. TODO(itum) + Halo.
+- [ ] Asimetrični JWT ključevi za potpisivanje uključeni (tada `getClaims()` proverava potpis lokalno, bez poziva Auth serveru). Proveriti da projekat zaista izdaje ES256 tokene (`kid` u headeru tokena): kod HS256 tokena `getClaims()` tiho prelazi na mrežni `getUser()` pri svakom pozivu. Posle prelaska deaktivirati legacy JWT ključ.
+- [ ] Mejlovi za poziv i reset lozinke vode na `/admin/auth/confirm?token_hash={{ .TokenHash }}&type=…`, koji na serveru zove `verifyOtp`. Podrazumevani `{{ .ConfirmationURL }}` vraća token u `#` delu adrese, koji server ne vidi. Ruta je u matcheru `proxy.ts` i ima `Cache-Control: no-store`. Proveriti na trenutnim šablonima.
+- [ ] Kolačići sesije: `cookieOptions: { secure: true }` u produkciji, i na browser i na server klijentu. `@supabase/ssr` podrazumevano ne postavlja `Secure` (ostalo: `SameSite=Lax`, nije HttpOnly, `maxAge` 400 dana). Kolačić se uvek čita kroz Supabase klijent, nikad ručno: kad je velik (npr. sa TOTP faktorom), deli se na `.0`, `.1`…
+- [ ] Trajanje sesije (ograničenje trajanja i odjava posle neaktivnosti) ako plan dozvoljava, npr. 12 h / 2 h. TODO(itum) + Halo. Timebox, inactivity timeout i single-session traže Pro plan. „Inactivity timeout“ meri vreme bez refresh-a, pa ga otvoren admin tab nikad ne aktivira. Razmotriti i kraći access JWT (10–15 min umesto 1 h).
 
 ### 3.2 MFA (TOTP)
 - Obavezan za sve osoblje, jer se prijavljuje samo osoblje. Minimum su admin i sales. TODO(halo): da li svi imaju telefon za aplikaciju autentifikatora.
@@ -90,20 +92,31 @@
   - postoji jedna `aal1` stranica `/admin/mfa` koja zove samo `supabase.auth.mfa.*` (enroll, challenge, verify) i ne čita nijednu tabelu,
   - `requireRole()` proverava `aal` iz `getClaims()` **pre** bilo kog čitanja `profiles` i vraća `mfa_required` (vodi na `/admin/mfa`),
   - restrictive politike važe samo za tabele i Storage, ne i za Auth API, pa upis faktora radi pri `aal1`,
-  - posle upisa i potvrde koda sesija dobija `aal2` i tek tada se čita profil.
+  - posle upisa i potvrde koda sesija dobija `aal2` i tek tada se čita profil,
+  - `/admin/mfa*` koristi `requireAal1Session()` (Prilog B.1): traži prijavu, ali ne `aal2`, i ne čita tabele,
+  - admin aktivira nalog (`is_active = true`) tek kad korisnik ima potvrđen TOTP faktor; `set_user_role()` to sama proverava (Prilog C.4).
 - Izgubljen telefon: samo admin resetuje faktor drugom korisniku, posle provere uživo ili telefonom, uz upis u `audit_log`. Ako admin izgubi pristup, Predrag resetuje preko Supabase dashboarda.
 
 ### 3.3 Provera identiteta na serveru
 - Na serveru uvek `supabase.auth.getClaims()` (proverava potpis JWT-a). `getSession()` se nikad ne koristi za odluke o pristupu.
 - `getClaims()` ne zna da li je sesija u međuvremenu ugašena na serveru. Zato se uz svaki zahtev iz baze čitaju i `profiles.role` i `profiles.is_active`. Deaktivacija naloga deluje odmah.
+- To ne rešava ukradenu sesiju aktivnog zaposlenog: posle odjave, promene lozinke ili reseta faktora access token važi do `exp` (do 1 h). Zato `private.session_is_valid()` proverava da `session_id` iz JWT-a još postoji u `auth.sessions` i da `not_after` nije prošao. Zove se iz restrictive politike i iz `private.has_role()` (Prilog C.1, C.2), pa brisanje sesije (3.4) odmah deluje i na RLS i na `requireRole()`.
 - Jedna funkcija `requireRole()` u `src/lib/auth/require-role.ts` (Prilog B.1). Svi admin ulazi je koriste.
-- `proxy.ts` matcher pokriva samo `/admin` (i stranicu prijave). Javne, keširane stranice ne smeju da osvežavaju sesiju, jer bi keširan odgovor mogao da ponese tuđi `Set-Cookie`. Javni podaci se čitaju klijentom bez kolačića.
-- `?next=` posle prijave prihvata samo relativne putanje unutar `/admin` (Prilog B.3).
-- Odjava briše sesiju. Admin ima i „Odjavi sa svih uređaja".
+- `proxy.ts` matcher pokriva samo `/admin` (i stranicu prijave). Javne, keširane stranice ne smeju da osvežavaju sesiju, jer bi keširan odgovor mogao da ponese tuđi `Set-Cookie`. Javni podaci se čitaju klijentom bez kolačića: ESLint `no-restricted-imports` u javnim rutama zabranjuje `@/lib/supabase/server` i `createBrowserClient`, a javne akcije koriste klijent sa `persistSession: false`.
+- `proxy.ts` osvežava sesiju pre Server Components (one ne mogu da upisuju kolačiće). Na svaki `/admin` odgovor, uključujući preusmerenja, stavlja `Cache-Control: private, no-store` i zaglavlja koja `@supabase/ssr` prosledi u `setAll` (Prilog B.8).
+- `?next=` posle prijave prihvata samo relativne putanje unutar `/admin`, proverene u kanonskom obliku (Prilog B.3).
+- Obično dugme „Odjava“ zove `signOut({ scope: 'local' })`, jer je podrazumevano `'global'` (odjava sa svih uređaja). „Odjavi sa svih uređaja“ je posebno dugme sa `'global'`.
 - Svaka osoba ima svoj nalog. Zajednički nalozi su zabranjeni, inače `audit_log` gubi smisao.
 
 ### 3.4 Kad neko od osoblja ode
-`is_active = false` → odjava svih sesija → uklanjanje MFA faktora → pregled `audit_log` za poslednjih 30 dana. TODO(halo): ko javlja odlazak zaposlenog.
+Redosled (jedna server akcija, samo za admina):
+1. `set_user_role(id, role, false)`: `is_active = false`, svaki sledeći zahtev je odbijen.
+2. `auth.admin.updateUserById(id, { ban_duration })`: nalog više ne dobija nove tokene. `auth.admin.signOut()` ovde ne pomaže, jer prima JWT korisnika, a ne njegov ID.
+3. `revoke_user_sessions(id)` (Prilog C.8): briše redove iz `auth.sessions`. Refresh tokeni prestaju da važe, a uz `session_is_valid()` i postojeći access token. Neprovereno kao zvaničan API; proveriti lokalno i na hosted verziji.
+4. `auth.admin.mfa.deleteFactor` za sve faktore korisnika.
+5. Upis u `audit_log`, pa pregled njegovih događaja za poslednjih 30 dana.
+
+TODO(halo): ko javlja odlazak zaposlenog.
 
 ---
 
@@ -111,7 +124,7 @@
 
 ### 4.1 Uloge
 Tabela „Uloge — ko sme šta" iz `CLAUDE.md` važi. Dodaci:
-- `profiles.role` i `profiles.is_active` menja samo admin, kroz funkciju `set_user_role()` koja proverava admin + aal2, ne dozvoljava uklanjanje poslednjeg aktivnog admina i upisuje `audit_log` (Prilog C.4).
+- `profiles.role` i `profiles.is_active` menja samo admin, kroz funkciju `set_user_role()` (Prilog C.4). Funkcija proverava admin + aal2 i ne dozvoljava uklanjanje poslednjeg aktivnog admina. Promene uloga zaključava advisory lock-om, jer bi inače dva admina koja istovremeno ražaluju jedan drugog oba prošla. Odbija `p_active = null`, a aktivaciju dozvoljava samo uz potvrđen TOTP faktor. Svaku promenu upisuje u `audit_log`. `is_active` je `not null default false`.
 - Korisnik u svom redu u `profiles` sme da menja samo dozvoljene kolone (npr. `full_name`), preko kolonskog GRANT-a (Prilog C.3).
 - Uloga se nikad ne čita iz `user_metadata`, jer ga korisnik sam menja. Ako se ikad stavi u JWT, samo preko `app_metadata` ili Auth hook-a.
 - Editor ne vidi zahteve, putnike, cenovnike ni uvoze.
@@ -119,6 +132,8 @@ Tabela „Uloge — ko sme šta" iz `CLAUDE.md` važi. Dodaci:
 ### 4.2 Aplikacioni sloj (Next.js)
 - Redosled u svakoj server akciji: zod (`.strict()`) → `requireRole()` → posao → `audit_log` → `updateTag` (Prilog B.2).
 - Admin stranice zovu `requireRole()` u layout-u **i** u svakoj akciji i funkciji koja čita podatke. Zaštita layout-a ne štiti server akcije.
+- Server akcije su dostupne sa bilo koje putanje (POST sa `Next-Action` headerom), ne samo sa stranice na kojoj se koriste. Zato ih proxy matcher i WAF pravila po putanji ne štite. `requireRole()` je prvi poziv posle zod-a u svakoj admin akciji. CI grep pada ako fajl sa `'use server'` u admin delu ne zove `requireRole(`. WAF pravila za akcije koriste uslov „Server Action Name“.
+- `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` se ne postavlja na Vercelu; Next pravi ključ po build-u.
 - Route handleri isto. Za POST sa kolačićima dodatno proveri `Origin`, jer server akcije to rade same, a route handleri ne.
 - Čitanje podataka za admin ide kroz funkcije sa `import 'server-only'` koje vraćaju samo potrebna polja, ne cele redove.
 - `"use cache"` samo za javne podatke. Nikad za funkcije koje čitaju kolačiće, sesiju ili lične podatke.
@@ -127,22 +142,28 @@ Tabela „Uloge — ko sme šta" iz `CLAUDE.md` važi. Dodaci:
 - `serverActions.allowedOrigins` ne podešavati osim ako je baš potrebno, i nikad ne dodavati `null`.
 
 ### 4.3 Baza: RLS, GRANT, funkcije, view-ovi
+- **GRANT model.** Supabase novim projektima od 30.05.2026, a postojećim od 30.10.2026, ne daje tabelama u `public` automatske privilegije. Prva migracija to piše i eksplicitno (`alter default privileges … revoke`, Prilog C.0), da lokalna baza, dev i produkcija rade isto.
+  - Svaka tabela u istoj migraciji dobija `grant` samo za operacije za koje ima politiku, po ulozi. Bez `grant select on public.profiles to authenticated` `requireRole()` dobija grešku 42501.
+  - TRUNCATE (zaobilazi RLS), REFERENCES i TRIGGER ne dobija niko. PostgREST TRUNCATE ne izlaže, ali to je odbrana u dubini.
+  - pgTAP proverava privilegije, ne samo politike (Prilog C.5).
 - RLS uključen na svakoj tabeli u `public`. pgTAP test pada ako nije (Prilog C.5).
 - Politike se pišu po operaciji i po ulozi (`to authenticated`), uz helper `private.has_role(...)` (Prilog C.1).
 - Tabele sa ličnim podacima (`booking_requests`, `travelers`, `quotes`, `proformas`, `audit_log`): pored RLS-a i `revoke all ... from anon`.
 - **Funkcije.** Postgres podrazumevano daje EXECUTE svima, a na Supabase-u je svaka funkcija u `public` dostupna preko `/rest/v1/rpc/`, i anonimnim korisnicima. Zato:
   - helperi (`has_role`, rate limit) idu u šemu `private`, koja nije izložena kroz API,
-  - svaka `SECURITY DEFINER` funkcija ima `set search_path = ''`, potpuno kvalifikovana imena tabela, proveru uloge **unutar** funkcije, `revoke execute ... from public, anon` i `grant` samo onima kojima treba,
-  - pgTAP proverava da anon ne može da izvrši nijednu `SECURITY DEFINER` funkciju u `public`.
+  - svaka `SECURITY DEFINER` funkcija ima `set search_path = ''`, potpuno kvalifikovana imena tabela, proveru uloge **unutar** funkcije, `revoke execute ... from public, anon, authenticated` i `grant` samo onima kojima treba. Direktan grant za `authenticated` preživljava revoke od `public` (lokalni test na PG16),
+  - `SECURITY DEFINER` funkcije zaobilaze RLS, pa i restrictive aal2 politiku; zato i one proveravaju aal i važeću sesiju (kroz `private.has_role()`, Prilog C.1),
+  - pgTAP proverava da anon ne može da izvrši nijednu `SECURITY DEFINER` funkciju u `public`, a da `authenticated` izvršava samo funkcije sa izričite liste.
 - **View-ovi** zaobilaze RLS ako nemaju `with (security_invoker = true)`. Svaki view ga mora imati (test).
+- **Materialized view** ne podržava ni RLS ni `security_invoker`. U `public` nema privilegija ni za `anon` ni za `authenticated` (test).
 - Nepromenljivi zapisi:
   - poslata ponuda (posle `quote_sent`): trigger zabranjuje UPDATE,
-  - `booking_events` i `audit_log`: samo INSERT, bez UPDATE i DELETE za bilo koju ulogu,
+  - `booking_events` i `audit_log`: samo INSERT, bez UPDATE i DELETE za bilo koju ulogu. Pored izostanka politika, `before update or delete` i `before truncate` trigeri bacaju grešku (Prilog C.7), jer `service_role` i vlasnik tabele zaobilaze RLS. Posledica: brisanje ličnih podataka na zahtev (§14) anonimizuje zahtev umesto da briše red, a `booking_events` ne sadrži lične podatke,
   - redovi objavljenog cenovnika se ne menjaju; nova verzija = novi uvoz; korekcije su zasebna tabela.
 - Supabase Security Advisor (dashboard) bez upozorenja pre svakog merge-a koji menja bazu i pre lansiranja.
 - **Površina Data API-ja.** Svaka uključena Supabase usluga je dodatna ulazna tačka za nekoga sa publishable ključem:
-  - `pg_graphql` je podrazumevano uključen i izlaže šemu (introspekciju) preko `/graphql/v1`; ako ga ne koristimo, isključiti ekstenziju,
-  - Realtime isključiti (ili ostaviti bez ijedne tabele u publikaciji) dok ga ne koristimo,
+  - `pg_graphql` je podrazumevano uključen i izlaže šemu (introspekciju) preko `/graphql/v1`; ne koristimo ga, pa `drop extension if exists pg_graphql`,
+  - Realtime isključiti (ili ostaviti bez ijedne tabele u publikaciji) dok ga ne koristimo, i isključiti „Allow public access“ u podešavanjima Realtime-a,
   - izložena samo šema `public` (Data API → Exposed schemas); `private` nikad,
   - `db-extra-search-path` ostaje na podrazumevanoj vrednosti, bez dodatnih šema,
   - ručna provera pre lansiranja: `curl` sa publishable ključem na `/graphql/v1` mora da vrati grešku.
@@ -158,7 +179,12 @@ Tabela „Uloge — ko sme šta" iz `CLAUDE.md` važi. Dodaci:
 | Zahtevi, putnici, ponude, predračuni, uvozi, audit | ništa | |
 | INSERT u bilo koju tabelu | ništa | zahtev kupca upisuje server |
 
-**Upis zahteva kupca.** Anon nema INSERT politiku. Server akcija posle validacije, Turnstile-a i rate limita poziva funkciju `create_booking_request(...)` preko admin klijenta. Funkcija je `SECURITY DEFINER` i izvršiva samo za `service_role`. U jednoj transakciji upisuje zahtev i prvi red u `booking_events`. Tako niko ne može da zaobiđe formu direktnim pozivom API-ja.
+**Upis zahteva kupca.** Anon nema INSERT politiku. Server akcija posle validacije i Turnstile-a poziva funkciju `create_booking_request(...)` preko admin klijenta (Prilog C.6).
+- Funkcija je `SECURITY INVOKER`: poziva je samo `service_role`, koji ionako zaobilazi RLS, pa definer ne donosi ništa osim rizika.
+- Izvršiva je samo za `service_role`: `revoke … from public, anon, authenticated`. Bez revoke-a od `authenticated` svaki prijavljen korisnik bi mogao da je pozove direktno, mimo Turnstile-a i rate limita.
+- U jednoj transakciji: rate limit (6.3), ponovna provera da je ponuda objavljena, da termin pripada ponudi i nije stop sale i granica broja putnika, upis zahteva i prvog reda u `booking_events`.
+
+Tako niko ne može da zaobiđe formu direktnim pozivom API-ja, pa ni prijavljen korisnik.
 
 **ODLUKA-1 — da li su cenovnici javno čitljivi?**
 `CLAUDE.md` je ranije (sekcija „Baza i Supabase“) govorio da anon čita objavljene verzije cenovnika. To je u redu samo ako u bazi stoje krajnje cene. Ako Excel partnera sadrži netto cene (otvoreno pitanje iz sekcije „Otvorena pitanja“ u `CLAUDE.md`), javno čitanje otkriva nabavne cene i maržu svakome ko ima publishable ključ.
@@ -200,7 +226,7 @@ Kolačići sesije iz `@supabase/ssr` po defaultu nisu HttpOnly, jer ih browser k
 - Cena iz forme se ignoriše (već u `CLAUDE.md`).
 - Odbrana od botova, u slojevima:
   1. honeypot polje (skriveno, `autocomplete="off"`, `tabIndex={-1}`),
-  2. Cloudflare Turnstile: token se proverava na serveru tajnim ključem, uz proveru `success` i `hostname`; token je jednokratan,
+  2. Cloudflare Turnstile: token se proverava na serveru tajnim ključem, uz proveru `success`, `hostname` i `action`. Token je jednokratan, najviše 2048 znakova i ne stariji od 300 s. Ako poziv siteverify-a ne uspe (mreža, timeout), zahtev se odbija,
   3. rate limit (6.3),
   4. Vercel WAF pravilo za POST zahteve forme (6.3).
 - **ODLUKA-2:** Turnstile je nova zavisnost (skripta + serverski poziv, bez obaveznog npm paketa). Treba ga odobriti i dodati u Stack tabelu i u politiku privatnosti.
@@ -214,7 +240,7 @@ Kolačići sesije iz `@supabase/ssr` po defaultu nisu HttpOnly, jer ih browser k
 ### 6.3 Rate limit
 Vercel funkcije nemaju zajedničku memoriju, pa brojač ne može biti u promenljivoj.
 - **Sloj 1 — Vercel WAF:** pravilo za POST na rute forme i kalkulatora (server akcije šalju POST na putanju stranice, sa `Next-Action` headerom). Proveriti limite plana.
-- **Sloj 2 — brojač u Postgres-u:** tabela `private.rate_limits` i funkcija `private.hit_rate_limit(key, limit, window)`. Početni ključevi:
+- **Sloj 2 — brojač u Postgres-u:** tabela `private.rate_limits` i funkcija `private.hit_rate_limit(key, limit, window)`. Brojač je atomičan (`insert … on conflict do update … returning`, Prilog C.6). Šema `private` nije izložena kroz API, pa se funkcija ne zove preko `rpc()`: forma je zove unutar `create_booking_request`, a kalkulator kroz tanak omotač `public.check_rate_limit()`, izvršiv samo za `service_role`. Početni ključevi:
   - `zahtev:ip:<hmac>` — npr. 5 na 10 min,
   - `zahtev:mejl:<hmac>` — npr. 3 na 24 h (štiti tuđe inboxe),
   - `kalkulator:ip:<hmac>` — npr. 120 na minut.
@@ -244,9 +270,10 @@ Vercel funkcije nemaju zajedničku memoriju, pa brojač ne može biti u promenlj
 - Podešavanja bucketa u migraciji/configu: `allowed_mime_types` = `image/jpeg`, `image/png`, `image/webp`; `file_size_limit` = 10 MB. SVG nikad.
 - Bucket proverava MIME prema `Content-Type` koji šalje klijent, a to može da se lažira. Storage politika (RLS) ne vidi sadržaj fajla. Zato je tok:
   1. browser traži od servera putanju `offers/<offer_id>/<uuid>.<ext>`; server proverava ulogu i da ponuda postoji,
-  2. browser uploaduje direktno u Storage (politika: samo editor/sales/admin, samo prefiks `offers/`, samo INSERT, bez upsert-a i UPDATE-a),
+  2. browser uploaduje direktno u Storage (INSERT politika: samo editor/sales/admin, samo prefiks `offers/`; bez UPDATE politike, pa ni upsert-a),
   3. server akcija `registerImage()` čita prvih 16 bajtova i proverava potpis: JPEG `FF D8 FF`, PNG `89 50 4E 47 0D 0A 1A 0A`, WebP `RIFF????WEBP`. Ako ne odgovara, briše fajl i vraća grešku. Tek tada upisuje sliku u tabelu.
 - Fajl u Storage-u bez reda u bazi, stariji od 24 h, je smeće (kasnije automatsko čišćenje).
+- Brisanje slike briše i fajl (`CLAUDE.md`). `remove()` traži DELETE **i** SELECT politiku na `storage.objects` za osoblje, ograničenu na bucket `images` i prefiks `offers/` (Prilog C.9). Bez njih brisanje ne radi.
 - `next/image` `remotePatterns`: samo `https://<ref>.supabase.co/storage/v1/object/public/images/**`. `dangerouslyAllowSVG` ostaje isključen.
 - Anon nema SELECT politiku na `storage.objects` (nema listanja). Javne slike se čitaju preko javnog URL-a sa uuid putanjom. Slike iz nacrta vidi ko zna URL, što je prihvatljivo.
 - Uklanjanje EXIF podataka (GPS) je opciono i nisko prioritetno za hotelske fotografije.
@@ -257,6 +284,7 @@ Vercel funkcije nemaju zajedničku memoriju, pa brojač ne može biti u promenlj
 
 ### 7.3 Dokumenti (bucket `documents`)
 - Privatan, samo sales/admin. Osoblje pristupa preko signed URL-a kratkog roka (npr. 60 s).
+- Politike: INSERT i SELECT za sales/admin; bez UPDATE i DELETE, jer je poslata ponuda dokaz (Prilog C.9).
 - Kupac dobija PDF ponude i predračuna **kao prilog mejla**, ne kao signed URL. Kratak rok bi istekao pre nego što kupac otvori mejl, a dug rok je javni link do ličnih podataka. Primenjeno u `CLAUDE.md` („Ponuda i predračun“).
 
 ---
@@ -289,6 +317,9 @@ U `next.config.ts` kroz `headers()` (Prilog B.5): `X-Content-Type-Options`, `Ref
 ### 9.2 CSP — dve strategije
 - CSP sa nonce-om zahteva dinamičko renderovanje, a to se kosi sa keširanjem javnih stranica (`"use cache"`, cilj LCP < 2,5 s). Zato:
   - **`/admin`** (ionako dinamički, a tu su sesije i lični podaci): strogi CSP sa nonce-om iz `proxy.ts` (`script-src 'self' 'nonce-…' 'strict-dynamic'`), bez GA4 i Meta piksela.
+    - Nonce ne radi sa statičkim shell-om koji pravi Cache Components. CSP vodič u `node_modules/next/dist/docs/` kaže da je PPR „incompatible with nonce-based CSP“. Zato `/admin` ima sopstveni root layout (`src/app/(admin)/admin/layout.tsx`) sa `export const instant = false` i `await connection()` van `<Suspense>`, pa se ceo admin renderuje po zahtevu (Prilog B.9). Proveriti na build-u u koraku 7.
+    - Globalni CSP iz `next.config.ts` ne važi za `/admin` (izuzet u `source`, Prilog B.6), da se dve politike ne seku.
+    - Nonce se generiše pre `createServerClient`, a isti request headeri (sa nonce-om) idu u oba `NextResponse.next(...)` poziva, jer `setAll` pravi nov odgovor i inače bi ih izgubio (Prilog B.8).
   - **Javni sajt:** statički CSP bez nonce-a iz `next.config.ts`. `script-src` tu mora da ima `'unsafe-inline'` zbog Next.js inline skripti, pa je zaštita od XSS-a slabija i glavna odbrana su pravila iz sekcije 5. CSP i dalje vredi za `frame-ancestors`, `object-src`, `base-uri`, `form-action` i `connect-src`.
 - Prvo `Content-Security-Policy-Report-Only` na preview-u, pa prava politika kad prijave prestanu.
 - Pre pisanja: pročitati CSP vodič u `node_modules/next/dist/docs/` i tačne domene GA4, Meta piksela i Turnstile-a iz njihove dokumentacije.
@@ -317,7 +348,7 @@ U `next.config.ts` kroz `headers()` (Prilog B.5): `X-Content-Type-Options`, `Ref
 - Predlog spiska env promenljivih je u Prilogu D.
 
 ### 10.3 Rotacija
-- U runbook-u (sekcija 15) stoji spisak ključeva, gde se koriste i kako se rotiraju: Supabase secret, Resend, Turnstile secret, `RATE_LIMIT_SECRET`.
+- U runbook-u (sekcija 15) stoji spisak ključeva, gde se koriste i kako se rotiraju: Supabase secret, Resend, Turnstile secret, `RATE_LIMIT_SECRET`, S3 ključevi za noćnu kopiju Storage-a (15.2).
 - Rotacija odmah ako ključ završi u git-u, logu, chatu ili AI alatu, ili ako ode osoba koja mu je imala pristup.
 - Pre lansiranja produkcija dobija nove ključeve; razvojni se ne prenose.
 
@@ -330,6 +361,10 @@ U `next.config.ts` kroz `headers()` (Prilog B.5): `X-Content-Type-Options`, `Ref
 - `npm audit --audit-level=high` u CI.
 - Nova biblioteka = prvo pitanje (već u `CLAUDE.md`). Pre dodavanja proveriti održavanje, popularnost i install skripte.
 - Next.js i React uvek na poslednjem patch-u svoje verzije. U 2025–2026. bilo je ozbiljnih ranjivosti baš u delovima koje koristimo (zaobilaženje middleware-a posebnim headerom, RCE u React Server Components, CSRF u server akcijama sa `Origin: null`). Pratiti GitHub Security Advisories za `vercel/next.js` i `facebook/react`.
+  - Minimum: `next` ≥ 16.4.1 (izdanje od 14.10.2026 ispravlja kritični RCE u `use cache`, a mi koristimo Cache Components) i `react` ≥ 19.2.9. Trenutno: `next` 16.4.2, `react` 19.3.0.
+  - Zakrpe stižu samo na Active LTS minor, pa ne ostajemo na starom minor-u.
+  - CI pada ako je verzija ispod minimuma. Critical zakrpa se primenjuje u roku od 48 h.
+- Lokalni Supabase CLI se redovno ažurira. Dve Auth zakrpe iz 2026 (replay AAL1 tokena, provera bana) već su na hosted servisu, ali ne i u starom lokalnom image-u.
 - GitHub Actions: `permissions: contents: read` po defaultu, akcije zakucane na commit SHA, bez produkcionih tajni u CI.
 
 ---
@@ -348,7 +383,8 @@ U `next.config.ts` kroz `headers()` (Prilog B.5): `X-Content-Type-Options`, `Ref
 
 ## 13. AI alati (Claude Code, MCP)
 
-- `.claude/settings.json` u repou (Prilog B.7): zabrana čitanja `.env` fajlova, potvrda za `git push`, zabrana komandi nad produkcijom. Proveriti u dokumentaciji Claude Code-a kako se pravila primenjuju na Bash komande.
+- `.claude/settings.json` u repou (Prilog B.7): zabrana čitanja `.env` fajlova, potvrda za `git push`, zabrana komandi nad produkcijom.
+- `deny` pravila **nisu bezbednosna granica** (dokumentacija Claude Code-a): `Read(./.env)` ne sprečava `cat .env` kroz Bash. Za pravu zaštitu: sandbox za Bash ili PreToolUse hook, i bez produkcionih kredencijala na dev mašini.
 - Supabase MCP: samo lokalna ili dev baza, u read-only režimu i ograničen na dev projekat. **Ne povezivati ga sa produkcijom u MVP-u** (primenjeno u `CLAUDE.md`, „Baza i Supabase“). Napomena kupca, tekst iz Worda i Excel ćelije mogu sadržati „uputstva" za agenta (prompt injection), a produkcija sadrži lične podatke.
 - **ODLUKA-3:** kad Claude Code čita `tests/fixtures/`, sadržaj pravih Excel fajlova i starih obračuna ide modelu. Potvrditi sa Halo-om da je to u redu, ili raditi sa anonimizovanim kopijama gde je moguće. Proveriti podešavanja privatnosti naloga.
 - Svaku migraciju, RLS politiku, GRANT, Storage politiku i `SECURITY DEFINER` funkciju koju napiše AI čovek pregleda liniju po liniju. Tipične greške: `using (true)`, zaboravljen `revoke`, politika za pogrešnu ulogu, `security definer` bez `search_path`.
@@ -364,7 +400,9 @@ Nije pravni savet; proverava pravnik klijenta.
 - Rokovi čuvanja: TODO(halo) + pravnik. Na primer, nerealizovani zahtevi se brišu ili anonimizuju posle X meseci; realizovani se čuvaju po propisima o računovodstvu i turizmu. Kad se dogovori, dodati zakazano čišćenje.
 - Prava lica (uvid, ispravka, brisanje): ručni postupak u adminu, samo za admina, uz upis u `audit_log`.
 - Obrađivači podataka koje treba navesti u politici privatnosti: Supabase, Vercel, Resend, Google (GA4), Meta, Cloudflare (Turnstile). TODO pravnik: ugovori o obradi i prenos podataka.
-- Logovi: nikad telo zahteva, ime, telefon, mejl ni uzrast. Greške se loguju sa ID-jem zahteva; klijent dobija opštu poruku.
+- Logovi: nikad telo zahteva, ime, telefon, mejl ni uzrast. Ni PostgREST polje `details`, jer CHECK greška u njemu ispisuje ceo red. Greške se loguju sa ID-jem zahteva i kodom greške; klijent dobija opštu poruku.
+- Stari obračuni za `tests/golden` dobijaju anonimizovana imena i kontakte pre prvog commita. Cene i ostali ulazi motora ostaju netaknuti, jer su golden vrednosti istina. Vidi i ODLUKA-3.
+- Brisanje na zahtev znači anonimizaciju reda, jer su `booking_events` i `audit_log` append-only (4.3).
 - Analitika: GA4 i Meta tek posle pristanka (već u `CLAUDE.md`). Bez ličnih podataka u URL-ovima i događajima. Meta „automatic advanced matching" isključen.
 - Curenje podataka: ZZPL predviđa obaveštavanje Poverenika (rok 72 h od saznanja). Postupak je u runbook-u; potvrditi sa pravnikom.
 
@@ -428,10 +466,18 @@ Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni 
 - [ ] zabranjeni prelazi statusa bacaju grešku
 - [ ] poslata ponuda ne može da se izmeni
 - [ ] objava cenovnika odbija korisnika bez sales/admin i bez aal2
-- [ ] Storage: anon i editor ne čitaju `imports` i `documents`; upload u `images` van `offers/` je odbijen; prepisivanje fajla je odbijeno
+- [ ] Storage: anon i editor ne čitaju `imports` i `documents`; upload u `images` van `offers/` je odbijen; prepisivanje fajla je odbijeno; osoblje briše sliku iz `images`; niko ne briše iz `imports` i `documents`
+- [ ] privilegije: niko nema TRUNCATE, REFERENCES ni TRIGGER u `public`; anon nema INSERT/UPDATE/DELETE nigde i SELECT samo na tabelama iz 4.4
+- [ ] `authenticated` izvršava samo funkcije sa izričite liste; `create_booking_request` i `revoke_user_sessions` samo `service_role`
+- [ ] materialized view-ovi nisu dostupni ni anon ni authenticated
+- [ ] `set_user_role`: `p_active = null` odbijen; aktivacija bez potvrđenog TOTP-a odbijena; dva admina koja ražaluju jedan drugog iz dve konekcije (npr. `dblink`) ostavljaju bar jednog aktivnog admina
+- [ ] opozvana sesija (red obrisan iz `auth.sessions`) ne vidi ništa, iako je JWT još važeći
+- [ ] `audit_log` i `booking_events`: UPDATE, DELETE i TRUNCATE bacaju grešku i za `service_role`
+- [ ] svaki test po ulozi prvo ubaci red (kao vlasnik) i potvrdi da postoji; `is_empty` nad praznom tabelom ne dokazuje ništa
 
 ### Vitest
-- [ ] `safeRedirectPath` i `safeHref`, uključujući `javascript:`, `  javascript:`, `java\tscript:`, `data:`, `//evil.com`, `/administrator`, `/admin.evil`, `/admin/..//evil.com`
+- [ ] `safeRedirectPath` i `safeHref`, uključujući `javascript:`, `  javascript:`, `java\tscript:`, `data:`, `//evil.com`, `/\evil.com`, `/administrator`, `/admin.evil`, `/admin/..//evil.com`, `/admin/../login`. `safeRedirectPath` sve to odbija; `safeHref` za `//evil.com` i `/\evil.com` vraća kanonski `https://evil.com/`, nikad ulaz koji izgleda kao relativna putanja
+- [ ] Turnstile: pogrešan `action`, token stariji od 300 s i greška siteverify-a odbijaju zahtev
 - [ ] rate limit: zahtev sa lažnim `x-forwarded-for` ne menja ključ brojača
 - [ ] prijava i reset lozinke: isti odgovor za postojeći i nepostojeći mejl
 - [ ] Excel: ZIP sa premalim fajlom a ogromnim raspakovanim sadržajem se odbija pre parsiranja
@@ -445,11 +491,17 @@ Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni 
 - [ ] korisnik bez upisanog faktora stiže do `/admin/mfa`, upiše faktor i tek tada dobija pristup podacima
 - [ ] direktan poziv admin server akcije bez sesije je odbijen
 - [ ] forma: popunjen honeypot ne pravi zapis; prekoračen limit daje poruku; bez Turnstile tokena zahtev je odbijen
+- [ ] svi `/admin` odgovori, i preusmerenja, imaju `Cache-Control: private, no-store`
+- [ ] admin stranice: CSP Report-Only ne prijavljuje nijednu blokiranu skriptu (nonce je na svim skriptama)
+- [ ] link za poziv iz mejla prolazi kroz `/admin/auth/confirm` i vodi na postavljanje lozinke
+- [ ] posle offboardinga (3.4) otvoren tab tog korisnika odmah dobija odbijanje, ne tek posle isteka tokena
 
 ### Ručno pre lansiranja
 - [ ] Supabase Security Advisor bez upozorenja
 - [ ] `curl` sa publishable ključem na svaku tabelu i RPC funkciju: prazno ili greška tamo gde treba
 - [ ] `curl` sa publishable ključem na `/graphql/v1` i Realtime: greška (isključeni)
+- [ ] `curl` sa JWT-om prijavljenog korisnika na `/rest/v1/rpc/create_booking_request`: greška
+- [ ] JWT iz produkcije ima `alg: ES256` i `kid`
 - [ ] alarmi iz 15.3 podešeni i probani (lažna neuspela prijava daje obaveštenje)
 - [ ] provera headera (npr. Mozilla Observatory)
 - [ ] pretraga build-a za tajnama
@@ -463,43 +515,47 @@ Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni 
 - [ ] 2FA na svim nalozima
 - [ ] GitHub: privatan repo, zaštita `main`, Dependabot, gitleaks (pre-commit + CI)
 - [ ] CI: `npm ci`, typecheck, lint, test, `npm audit`, pretraga build-a za tajnama
+- [ ] CI: provera minimalne verzije `next` (≥ 16.4.1) i `react` (≥ 19.2.9)
 - [ ] `.gitignore` za `.env*`, `.env.example` bez vrednosti
-- [ ] `.claude/settings.json` (Prilog B.7)
-- [ ] Vercel: proverena Deployment Protection, env promenljive po okruženju, region `fra1`
-- [ ] Supabase: dev projekat odvojen od budućeg produkcionog; `enable_signup = false`; novi API ključevi
-- [ ] Supabase: `pg_graphql` i Realtime isključeni ako se ne koriste; izložena samo šema `public`
+- [ ] `.claude/settings.json` (Prilog B.7) + sandbox za Bash ili PreToolUse hook (deny pravila nisu granica); bez produkcionih kredencijala na dev mašini
+- [ ] Vercel: proverena Deployment Protection, env promenljive po okruženju, region `fra1`; bez `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY`
+- [ ] Supabase: dev projekat odvojen od budućeg produkcionog; `enable_signup = false`; novi API ključevi; ES256 ključevi aktivni, legacy JWT ključ deaktiviran; lokalni CLI ažuran
+- [ ] Supabase: `drop extension if exists pg_graphql`; Realtime isključen, uključujući „Allow public access“; izložena samo šema `public`
 - [ ] Osnovni security headeri (CSP kasnije)
 - [ ] ESLint: `react/no-danger` kao greška
 - [ ] SheetJS sa CDN-a ili iz `vendor/`, upisano u `docs/odluke.md`
 
 ### Korak 2 — Šema v1
 - [ ] ODLUKA-1; dok se ne odluči, anon nema pristup cenama
-- [ ] Šema `private` i `private.has_role()`
+- [ ] Prva migracija: `alter default privileges … revoke` (Prilog C.0); eksplicitni `grant` po tabeli i funkciji, samo za operacije sa politikom; nikome TRUNCATE/REFERENCES/TRIGGER
+- [ ] Šema `private`, `private.has_role()` i `private.session_is_valid()`
 - [ ] RLS na svakoj tabeli; `revoke ... from anon` na tabelama sa ličnim podacima
-- [ ] `profiles`: `role` (null dok admin ne dodeli), `is_active`, kolonski GRANT, `set_user_role()`
-- [ ] `audit_log`, samo INSERT
-- [ ] Restrictive aal2 politike (najkasnije u koraku 7, svakako pre prvih pravih podataka)
+- [ ] `profiles`: `role` (null dok admin ne dodeli), `is_active not null default false`, `grant select` + kolonski GRANT za `full_name`, `set_user_role()` sa advisory lock-om, odbijanjem `null` i proverom TOTP-a
+- [ ] `audit_log`, samo INSERT + append-only trigeri (Prilog C.7)
+- [ ] Restrictive aal2 politike sa proverom sesije (najkasnije u koraku 7, svakako pre prvih pravih podataka)
 - [ ] Storage bucketi sa `allowed_mime_types` i `file_size_limit`
 - [ ] uuid primarni ključevi
-- [ ] pgTAP: RLS svuda, `SECURITY DEFINER` i anon, view-ovi
+- [ ] pgTAP: RLS svuda, privilegije, `SECURITY DEFINER` i anon/authenticated, view-ovi i materialized view-ovi; testovi po ulozi sa ubačenim redovima (Prilog C.5)
 
 ### Korak 3a
 - [ ] Ništa posebno; fast-check invarijante već štite od negativnih iznosa
 
 ### Korak 7 — Prijava, uloge, RLS
 - [ ] Prijava + TOTP MFA (upis faktora i provera); Turnstile na prijavi i resetu
-- [ ] `aal1` stranica `/admin/mfa` za upis prvog faktora (ne čita tabele); `requireRole()` proverava `aal` pre čitanja `profiles`
+- [ ] `aal1` stranica `/admin/mfa` za upis prvog faktora (ne čita tabele, `requireAal1Session()`); `requireRole()` proverava `aal` pre čitanja `profiles`; aktivacija naloga tek posle potvrđenog TOTP-a
 - [ ] Prijava i reset lozinke: isti odgovor za postojeći i nepostojeći mejl
-- [ ] `requireRole()` i `safeRedirectPath()`
-- [ ] Admin layout i svaka akcija proveravaju ulogu; `proxy.ts` samo preusmerava, matcher samo `/admin`
-- [ ] Poziv osoblja (samo admin), deaktivacija, reset MFA
-- [ ] Supabase Auth: SMTP preko Resend-a, Redirect URLs, trajanje sesije
-- [ ] pgTAP negativni testovi po ulogama (sekcija 16)
-- [ ] Strogi CSP sa nonce-om na `/admin` (prvo Report-Only)
+- [ ] Poziv i reset kroz `/admin/auth/confirm` (`token_hash` + `verifyOtp`), u matcheru, `no-store`
+- [ ] `requireRole()` i `safeRedirectPath()` (kanonski oblik, Prilog B.3)
+- [ ] Admin layout i svaka akcija proveravaju ulogu; `proxy.ts` samo preusmerava, matcher samo `/admin`; CI grep za `requireRole(` u svakom `'use server'` fajlu admina; ESLint zabrana cookie klijenta u javnim rutama
+- [ ] Kolačići `secure: true` u produkciji; `Cache-Control: private, no-store` na svim `/admin` odgovorima; „Odjava“ sa `scope: 'local'`
+- [ ] Poziv osoblja (samo admin), reset MFA; offboarding po 3.4 (ban, `revoke_user_sessions`, brisanje faktora, `audit_log`)
+- [ ] Supabase Auth: SMTP preko Resend-a, Redirect URLs, trajanje sesije i access JWT-a
+- [ ] pgTAP negativni testovi po ulogama (sekcija 16), uključujući opozvanu sesiju i trku u `set_user_role`
+- [ ] Strogi CSP sa nonce-om na `/admin` (prvo Report-Only): sopstveni root layout sa `instant = false` + `await connection()`, `/admin` izuzet iz globalnog CSP-a, nonce pre `createServerClient` (Prilog B.8, B.9)
 
 ### Korak 8 — Sadržaj aranžmana
 - [ ] 8b: Tiptap validator na serveru, `safeHref` u rendereru, testovi
-- [ ] 8c: upload sa proverom potpisa, Storage politike + pgTAP, `remotePatterns`
+- [ ] 8c: upload sa proverom potpisa, Storage politike (INSERT, SELECT i DELETE za osoblje, Prilog C.9) + pgTAP, `remotePatterns`
 - [ ] 8d: pregled nacrta dinamički + `noindex`; kopiranje aranžmana ne kopira ništa iz prodaje
 
 ### Koraci 4–6 i 9 — Excel uvoz (kad se odblokira)
@@ -517,20 +573,21 @@ Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni 
 - [ ] Kalkulator: zod, rate limit, vraća samo `PriceResult`
 
 ### Koraci 13–14 — Zahtev
-- [ ] `create_booking_request()` samo za `service_role`; anon bez INSERT-a
-- [ ] zod granice, honeypot, Turnstile, rate limit (IP + mejl), WAF pravilo
+- [ ] `create_booking_request()` kao `SECURITY INVOKER`, samo za `service_role` (revoke i od `authenticated`); rate limit i ponovne provere unutar funkcije (Prilog C.6); anon bez INSERT-a
+- [ ] zod granice, honeypot, Turnstile (`action`, rok 300 s, odbij na grešku siteverify-a), rate limit (IP + mejl, atomičan brojač), WAF pravilo
 - [ ] IP za rate limit iz headera koji Vercel sam postavlja (potvrđeno u dokumentaciji), ne iz slobodnog `x-forwarded-for`; test sa lažnim headerom
 - [ ] Mejl bez slobodnog teksta, subject bez korisničkog unosa; SPF/DKIM/DMARC
-- [ ] Statusi kroz funkciju; `booking_events` samo INSERT
+- [ ] Statusi kroz funkciju; `booking_events` samo INSERT + append-only trigeri; bez `on delete cascade` sa zahteva
 
 ### Korak 15 — PDF
-- [ ] Bucket `documents` privatan; osoblje preko kratkog signed URL-a; kupac dobija PDF kao prilog
+- [ ] Bucket `documents` privatan, politike INSERT/SELECT za sales/admin, bez UPDATE i DELETE; osoblje preko kratkog signed URL-a; kupac dobija PDF kao prilog
 - [ ] Poslata ponuda nepromenljiva (trigger)
 
 ### Koraci 16–17 — Završetak i lansiranje
 - [ ] CSP za javni sajt (Report-Only → prava politika); odluka o HSTS-u
 - [ ] Politika privatnosti sa spiskom obrađivača; GA4 i Meta posle pristanka, bez ličnih podataka
 - [ ] Vercel Pro + WAF pravila; Supabase Pro + backup + kopija Storage-a + test vraćanja
+- [ ] Na Pro planu: zaštita od procurelih lozinaka, timebox i inactivity timeout sesije, single-session (po odluci TODO(itum))
 - [ ] Novi ključevi za produkciju; razvojni se ne prenose
 - [ ] Runbook, kontakti, postupak kad zaposleni ode
 - [ ] Monitoring i alarmi iz 15.3 podešeni i probani
@@ -552,7 +609,7 @@ Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni 
 | TODO(halo) | Pristup DNS-u (SPF/DKIM/DMARC, HSTS) | Bane |
 | TODO(halo) | Prag upozorenja za promenu cene pri uvozu (%) | Milica / Dimitrije |
 | TODO(itum) | Gde se čuvaju kopije Storage-a; ko prima obaveštenja o incidentima | Stefan |
-| TODO(itum) | Trajanje sesije osoblja | Stefan + Halo |
+| TODO(itum) | Trajanje sesije osoblja; access JWT 10–15 min umesto 1 h | Stefan + Halo |
 
 ---
 
@@ -570,3 +627,21 @@ Kontakti: Predrag (tehnika), Stefan (ITum), Bane (odluke). TODO(halo): telefoni 
 - Vercel — Deployment Protection: https://vercel.com/docs/deployment-protection
 - Vercel — WAF rate limiting: https://vercel.com/docs/vercel-firewall/vercel-waf/rate-limiting
 - SheetJS — instalacija i CDN: https://docs.sheetjs.com/docs/getting-started/installation/nodejs
+
+## Izvori za verziju 2 (24.10.2026)
+
+Provereno 24.10.2026:
+- Supabase — breaking change, tabele bez automatskih GRANT-ova (novi projekti od 30.05.2026, postojeći od 30.10.2026): https://supabase.com/changelog/45329-breaking-change-tables-not-exposed-to-data-and-graphql-api-automatically
+- Next.js — bezbednosno izdanje od 14.10.2026 (RCE u `use cache`, ispravka u 16.4.1): https://nextjs.org/blog/nextjs-security-update-october-14-2026
+- Next.js — CSP vodič, PPR i nonce (lokalno: `node_modules/next/dist/docs/01-app/02-guides/content-security-policy.md`), `instant = false` i `connection()` (lokalno: `migrating-to-cache-components.md`)
+
+Iz spoljnog pregleda, nije ponovo provereno:
+- Supabase — Sessions: https://supabase.com/docs/guides/auth/sessions
+- Supabase — Data API hardening: https://supabase.com/docs/guides/database/data-api
+- Supabase — `auth.admin.signOut`: https://supabase.com/docs/reference/javascript/auth-admin-signout
+- Supabase — Storage access control: https://supabase.com/docs/guides/storage/security/access-control
+- `@supabase/ssr` izvorni kod (podrazumevane opcije kolačića): https://github.com/supabase/ssr
+- Next.js — proxy (server akcije i matcher): https://nextjs.org/docs/app/api-reference/file-conventions/proxy
+- Cloudflare — Turnstile server-side validation: https://developers.cloudflare.com/turnstile/get-started/server-side-validation/
+- SheetJS — parse options: https://docs.sheetjs.com/docs/api/parse-options
+- Claude Code — permissions: https://code.claude.com/docs/en/permissions

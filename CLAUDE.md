@@ -59,7 +59,7 @@ Kontakti kod klijenta: Milica i Dimitrije (operativa), Bane (vlasnik, donosi pos
 
 | Deo | Tehnologija | Napomena |
 |---|---|---|
-| Framework | Next.js 16.4 (App Router), React 19, TypeScript strict | Node 20.9+; pre koda čitati `node_modules/next/dist/docs/` |
+| Framework | Next.js 16.4 (najmanje 16.4.1), React 19 (najmanje 19.2.9), TypeScript strict | Node 20.9+; pre koda čitati `node_modules/next/dist/docs/`; minimum proverava CI |
 | Stilovi | Tailwind CSS 4 + shadcn/ui | CSS-first konfiguracija (`@theme` u CSS-u), bez `tailwind.config.js`; mobilni prvo |
 | Baza | Supabase Postgres | region Frankfurt (eu-central-1) |
 | Auth | Supabase Auth + `@supabase/ssr` | samo osoblje u MVP-u |
@@ -127,7 +127,7 @@ src/
       ponuda/[slug]/           # stranica ponude + kalkulator
       zahtev/                  # forma za rezervacioni zahtev, potvrda
       politika-privatnosti/
-    admin/                     # zaštićeno (proxy.ts)
+    (admin)/admin/             # zaštićeno (proxy.ts); sopstveni root layout zbog nonce CSP-a
       ponude/                  # lista aranžmana
         [id]/sadrzaj/          # tekst, program, uključeno/nije, napomene, SEO
         [id]/galerija/         # slike: upload, redosled, naslovna, alt
@@ -417,8 +417,9 @@ O nama, Kontakt, Opšti uslovi, FAQ, Politika privatnosti. Tekstove čekamo od H
 - Nikad ne menjaj šemu ručno kroz Studio na produkciji.
 - Posle svake migracije: `db reset` → `gen types` → `test db`.
 - **RLS je uključen na SVAKOJ tabeli.** Javno (anon) čitanje samo za objavljen sadržaj i aktivne popuste (samo polja koja sajt prikazuje). Pisanje samo prijavljene uloge, po tabeli iz „Uloge — ko sme šta“.
+- **Automatskih GRANT-ova nema.** Prva migracija ih ukida (`docs/bezbednost-prilozi.md` C.0), a svaka tabela i funkcija dobija eksplicitan `grant` samo za potrebne operacije i uloge. TRUNCATE, REFERENCES i TRIGGER ne dobija niko.
 - **Anon nema pristup tabelama cena** dok se ne odluči ODLUKA-1 (`docs/bezbednost.md`; zavisi od toga da li Excel partnera sadrži netto cene). Kalkulator čita objavljeni cenovnik server-only, kroz `src/lib/pricing/load-published.ts`, i vraća samo rezultat motora. Cena „od“ je kolona na ponudi.
-- **Anon nema INSERT politiku nigde.** Rezervacioni zahtev upisuje server kroz `create_booking_request()` (`SECURITY DEFINER`, izvršiva samo za `service_role`), posle validacije i rate limita.
+- **Anon nema INSERT politiku nigde.** Rezervacioni zahtev upisuje server kroz `create_booking_request()` (`SECURITY INVOKER`, izvršiva samo za `service_role`; rate limit i ponovne provere su unutar funkcije), posle validacije.
 - Uloge u `profiles.role`: `admin`, `sales` (prodaja), `editor` (urednik). Provera kroz SQL helper (npr. `has_role('sales')`).
 - **Storage:** `images` (javno čitanje; pisanje `editor`/`sales`/`admin`), `imports` (privatno; `sales`/`admin`), `documents` (privatno; `sales`/`admin`, pristup preko signed URL-a). Storage politike su takođe pokrivene pgTAP testovima.
 - Secret ključ (`sb_secret_…`) koristi samo `src/lib/supabase/admin.ts`, koji počinje sa `import 'server-only'`.
@@ -435,7 +436,7 @@ Pre pisanja koda za keširanje, rute, proxy ili server actions, pročitaj odgova
 - Keširanje je opt-in (`cacheComponents: true`): katalog i stranice ponuda koriste `"use cache"` + `cacheTag(...)` (npr. `offers`, `offer:<id>`, `price-list:<id>`, `discounts`). Posle „Objavi“ (sadržaja, cenovnika ili popusta) osveži oznake (`updateTag` / `revalidateTag(tag, profile)`; drugi argument je obavezan u v16).
 - Zaštita `/admin` ide kroz `src/proxy.ts` (ne `middleware.ts`, zastareo u v16). `proxy.ts` samo preusmerava na prijavu (matcher samo `/admin` i prijava) i nikad nije jedina zaštita: admin layout i **svaka** server akcija i funkcija za podatke same zovu `requireRole()`.
 - Na serveru identitet uvek kroz `supabase.auth.getClaims()`, nikad `getSession()`.
-- CSP: strogi sa nonce-om na `/admin` (iz `proxy.ts`), statički bez nonce-a na javnom sajtu (iz `next.config.ts`, zbog `"use cache"`). Prvo `Report-Only`.
+- CSP: strogi sa nonce-om na `/admin` (iz `proxy.ts`), statički bez nonce-a na javnom sajtu (iz `next.config.ts`, zbog `"use cache"`). Prvo `Report-Only`. Nonce ne radi sa statičkim shell-om, pa `/admin` ima sopstveni root layout sa `instant = false` i `await connection()` (`docs/bezbednost-prilozi.md` B.9).
 - `params`, `searchParams`, `cookies()`, `headers()` su async: uvek `await`.
 - `next/image` sa `images.remotePatterns` za Supabase Storage domen (ne `images.domains`).
 - Server actions: zod validacija ulaza → provera uloge → tipizovan rezultat `{ ok: true, data } | { ok: false, error }`. Nikad ne veruju klijentu.
@@ -626,7 +627,7 @@ Preview i produkcija imaju odvojene ključeve; preview nikad ne dobija produkcio
 Pre rada na prijavi, ulogama, RLS-u, migracijama, uploadu, Excel uvozu, formi zahteva, mejlovima ili headerima pročitaj `docs/bezbednost.md`.
 - Server akcija / route handler: zod (`.strict()`) → `requireRole()` → posao → `audit_log`. `proxy.ts` samo preusmerava (matcher `/admin`).
 - Na serveru `getClaims()`, nikad `getSession()`. Uloga i `is_active` se čitaju iz `profiles` pri svakom zahtevu.
-- Nova tabela: RLS + politike po operaciji i ulozi + pgTAP. Nova `SECURITY DEFINER` funkcija: `set search_path = ''`, provera uloge unutar funkcije, `revoke execute ... from public, anon`. View: `with (security_invoker = true)`.
+- Nova tabela: eksplicitni GRANT + RLS + politike po operaciji i ulozi + pgTAP (privilegije i politike). Nova `SECURITY DEFINER` funkcija: `set search_path = ''`, provera uloge unutar funkcije, `revoke execute ... from public, anon, authenticated`, pa `grant` samo kome treba. View: `with (security_invoker = true)`.
 - Anon: samo SELECT objavljenog sadržaja, nikad INSERT. Cene po ODLUKA-1.
 - Secret ključ samo u `src/lib/supabase/admin.ts`.
 - Bez `dangerouslySetInnerHTML` (izuzetak: JSON-LD komponenta). Linkovi samo `http`/`https`/`mailto`/`tel`.

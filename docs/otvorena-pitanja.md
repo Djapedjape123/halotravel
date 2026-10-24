@@ -34,7 +34,7 @@
 - [ ] Pristup Google Search Console-u (za 301 preusmerenja).
 - [ ] Postojeći GA4 i Meta piksel nalozi.
 
-## Bezbednost i lični podaci (detalji u `bezbednost.md` §19)
+## Bezbednost i lični podaci (detalji u `bezbednost.md` §18)
 - [ ] ODLUKA-3: da li pravi Excel fajlovi i stari obračuni smeju da se koriste u AI alatima (Claude Code), ili radimo sa anonimizovanim kopijama?
 - [ ] Da li sve osoblje ima telefon za aplikaciju autentifikatora (MFA je obavezan)?
 - [ ] Rokovi čuvanja ličnih podataka (nerealizovani i realizovani zahtevi), sa pravnikom.
